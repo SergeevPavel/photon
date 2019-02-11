@@ -1,13 +1,23 @@
+
+extern crate euclid;
+
 use std::fs::File;
 use std::io::Read;
+use std::path::Path;
 
+use glutin::Event;
 use glutin::EventsLoop;
 use glutin::GlContext;
 use glutin::GlWindow;
-
+use webrender::api::*;
 use webrender::Renderer;
-use webrender::api::RenderApiSender;
-use glutin::Event;
+
+use euclid::TypedPoint2D;
+
+mod text;
+
+use text::*;
+use app_units::Au;
 
 fn create_window(events_loop: &EventsLoop) -> GlWindow {
     let window_builder = glutin::WindowBuilder::new()
@@ -47,6 +57,15 @@ fn framebuffer_size(gl_window: &GlWindow) -> webrender::api::DeviceIntSize {
     webrender::api::DeviceIntSize::new(size.width as i32, size.height as i32)
 }
 
+fn init_font(api: &RenderApi, document_id: DocumentId, pipeline_id: PipelineId, font_size: i32) -> (FontKey, FontInstanceKey) {
+    let mut txn = Transaction::new();
+    txn.set_root_pipeline(pipeline_id);
+    let font_key = text::add_font(&api, &mut txn, "resources/Fira Code/ttf/FiraCode-Medium.ttf");
+    let font_instance_key = add_font_instance(&api, &mut txn, font_key, font_size);
+    api.send_transaction(document_id, txn);
+    return (font_key, font_instance_key);
+}
+
 fn run_events_loop() {
     let mut events_loop = EventsLoop::new();
     let gl_window = create_window(&events_loop);
@@ -57,37 +76,100 @@ fn run_events_loop() {
     let (mut renderer, sender) = create_webrender(&gl_window, &events_loop);
     let api = sender.create_api();
 
-    let document_id = api.add_document(framebuffer_size(&gl_window), 0);
+    let framebuffer_size = framebuffer_size(&gl_window);
+    let document_id = api.add_document(framebuffer_size, 0);
     let pipeline_id = webrender::api::PipelineId(0, 0);
+    let epoch = Epoch(0);
 
-    let mut txn = webrender::api::Transaction::new();
+    let text_size = 16;
+    let (font_key, font_instance_key) = init_font(&api, document_id, pipeline_id, text_size);
+
+    let mut txn = Transaction::new();
+    let layout_size = framebuffer_size.to_f32() / euclid::TypedScale::new(gl_window.get_hidpi_factor() as f32);
+    let mut builder = DisplayListBuilder::new(pipeline_id, layout_size);
+
+    let bounds = LayoutRect::new(LayoutPoint::zero(), builder.content_size());
+    let info = LayoutPrimitiveInfo::new(bounds);
+    let space_and_clip = SpaceAndClipInfo::root_scroll(pipeline_id);
+    builder.push_simple_stacking_context(&info, space_and_clip.spatial_id);
+
+    show_text(&api,
+              font_key,
+              text_size,
+              font_instance_key,
+              &mut builder,
+              &space_and_clip,
+              "Hello world!!!",
+              LayoutPoint::new(100.0, 100.0));
+
+    builder.pop_stacking_context();
+
+    txn.set_display_list(
+        epoch,
+        None,
+        layout_size,
+        builder.finalize(),
+        true,
+    );
+
     txn.set_root_pipeline(pipeline_id);
     txn.generate_frame();
     api.send_transaction(document_id, txn);
 
     events_loop.run_forever(|event| {
         match event {
-            Event::Awakened => {
-                return glutin::ControlFlow::Continue;
-            },
+            Event::Awakened => {},
             Event::WindowEvent { event: window_event, .. } => match window_event {
                 glutin::WindowEvent::CloseRequested => {
                     return glutin::ControlFlow::Break;
                 }
-                _ => {
-                    return glutin::ControlFlow::Continue;
-                }
+                _ => {}
             },
-            _ => {
-                return glutin::ControlFlow::Continue;
-            }
+            _ => {}
         }
+
+
+        renderer.update();
+        renderer.render(framebuffer_size);
+        let pp_info = renderer.flush_pipeline_info();
+        gl_window.swap_buffers().unwrap();
+        return glutin::ControlFlow::Continue;
     });
 
     renderer.deinit();
 }
 
+fn show_text(api: &RenderApi,
+             font_key: FontKey,
+             text_size: i32,
+             font_instance_key: FontInstanceKey,
+             builder: &mut DisplayListBuilder,
+             space_and_clip: &SpaceAndClipInfo,
+             text: &str,
+             origin: LayoutPoint) {
+    let (indices, positions, bounding_rect) = layout_simple_ascii(&api,
+                                                                  font_key,
+                                                                  font_instance_key,
+                                                                  text,
+                                                                  Au::from_px(text_size),
+                                                                  origin,
+                                                                  FontInstanceFlags::default());
+    let glyphs: Vec<GlyphInstance> = indices.iter().zip(positions)
+        .map(|(idx, pos)| GlyphInstance { index: *idx, point: pos })
+        .collect();
+    let info = LayoutPrimitiveInfo::new(bounding_rect);
+    builder.push_text(
+        &info,
+        &space_and_clip,
+        glyphs.as_slice(),
+        font_instance_key,
+        ColorF::BLACK,
+        None,
+    );
+}
+
 fn main() -> std::io::Result<()> {
+    env_logger::init();
     let mut f = File::open("resources/Main.java")?;
     let mut content = String::new();
     f.read_to_string(&mut content)?;
