@@ -10,7 +10,6 @@ pub fn add_font<P: AsRef<Path>>(api: &RenderApi, txn: &mut Transaction, path: P)
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer).unwrap();
     let font_key = api.generate_font_key();
-    println!("{:?}", buffer.len());
     txn.add_raw_font(font_key, buffer, 0);
     return font_key;
 }
@@ -47,7 +46,7 @@ pub fn layout_simple_ascii(
     let mut positions = Vec::new();
 
     let mut cursor = origin;
-    let direction = if flags.contains(FontInstanceFlags::TRANSPOSE) {
+    let horizontal_direction = if flags.contains(FontInstanceFlags::TRANSPOSE) {
         LayoutVector2D::new(
             0.0,
             if flags.contains(FontInstanceFlags::FLIP_Y) { -1.0 } else { 1.0 },
@@ -58,24 +57,29 @@ pub fn layout_simple_ascii(
             0.0,
         )
     };
-    for metric in metrics {
+
+    let vertical_direction = LayoutVector2D::new(0.0, size.to_f32_px() + 4.0);
+
+    for (ch, metric) in text.chars().zip(metrics) {
         positions.push(cursor);
 
-        match metric {
-            Some(metric) => {
-                let glyph_rect = LayoutRect::new(
-                    LayoutPoint::new(cursor.x + metric.left as f32, cursor.y - metric.top as f32),
-                    LayoutSize::new(metric.width as f32, metric.height as f32)
-                );
-                bounding_rect = bounding_rect.union(&glyph_rect);
-                cursor += direction * metric.advance;
-            }
-            None => {
-                // Extract the advances from the metrics. The get_glyph_dimensions API
-                // has a limitation that it can't currently get dimensions for non-renderable
-                // glyphs (e.g. spaces), so just use a rough estimate in that case.
-                let space_advance = size.to_f32_px() / 3.0;
-                cursor += direction * space_advance;
+        if ch == '\n' {
+            cursor += vertical_direction;
+            cursor.x = origin.x;
+        } else {
+            match metric {
+                Some(metric) => {
+                    let glyph_rect = LayoutRect::new(
+                        LayoutPoint::new(cursor.x + metric.left as f32, cursor.y - metric.top as f32),
+                        LayoutSize::new(metric.width as f32, metric.height as f32)
+                    );
+                    bounding_rect = bounding_rect.union(&glyph_rect);
+                    cursor += horizontal_direction * metric.advance;
+                }
+                None => {
+                    let space_advance = size.to_f32_px() / 3.0;
+                    cursor += horizontal_direction * space_advance;
+                }
             }
         }
     }

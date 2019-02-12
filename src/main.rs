@@ -22,6 +22,7 @@ use app_units::Au;
 fn create_window(events_loop: &EventsLoop) -> GlWindow {
     let window_builder = glutin::WindowBuilder::new()
         .with_title("photon")
+        .with_resizable(false)
         .with_dimensions((800, 600).into());
     let context = glutin::ContextBuilder::new()
         .with_vsync(false)
@@ -82,6 +83,7 @@ fn run_events_loop() {
     let epoch = Epoch(0);
 
     let text_size = 16;
+    let text = get_text();
     let (font_key, font_instance_key) = init_font(&api, document_id, pipeline_id, text_size);
 
     let mut txn = Transaction::new();
@@ -99,7 +101,7 @@ fn run_events_loop() {
               font_instance_key,
               &mut builder,
               &space_and_clip,
-              "Hello world!!!",
+              text.as_str(),
               LayoutPoint::new(100.0, 100.0));
 
     builder.pop_stacking_context();
@@ -168,12 +170,15 @@ fn show_text(api: &RenderApi,
     );
 }
 
+fn get_text() -> String {
+    let mut f = File::open("resources/Main.java").unwrap();
+    let mut content = String::new();
+    f.read_to_string(&mut content).unwrap();
+    return content
+}
+
 fn main() -> std::io::Result<()> {
     env_logger::init();
-    let mut f = File::open("resources/Main.java")?;
-    let mut content = String::new();
-    f.read_to_string(&mut content)?;
-
     run_events_loop();
 
     return Ok(());
