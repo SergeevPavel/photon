@@ -90,19 +90,38 @@ fn run_events_loop() {
     let layout_size = framebuffer_size.to_f32() / euclid::TypedScale::new(gl_window.get_hidpi_factor() as f32);
     let mut builder = DisplayListBuilder::new(pipeline_id, layout_size);
 
-    let bounds = LayoutRect::new(LayoutPoint::zero(), builder.content_size());
-    let info = LayoutPrimitiveInfo::new(bounds);
-    let space_and_clip = SpaceAndClipInfo::root_scroll(pipeline_id);
-    builder.push_simple_stacking_context(&info, space_and_clip.spatial_id);
+    let mut info = LayoutPrimitiveInfo::new(LayoutRect::new(LayoutPoint::zero(), builder.content_size()));
+    let root_space_and_clip = SpaceAndClipInfo::root_scroll(pipeline_id);
+    builder.push_simple_stacking_context(&info, root_space_and_clip.spatial_id);
+
+    let scroll_content_box = euclid::TypedRect::new(
+        euclid::TypedPoint2D::zero(),
+        euclid::TypedSize2D::new(100000.0, 100000.0),
+    );
+    let scroll_space_and_clip = builder.define_scroll_frame(
+        &root_space_and_clip,
+        None,
+        scroll_content_box,
+        euclid::TypedRect::new(euclid::TypedPoint2D::zero(), layout_size),
+        vec![],
+        None,
+        webrender::api::ScrollSensitivity::ScriptAndInputEvents,
+    );
+
+    let mut info = LayoutPrimitiveInfo::new(scroll_content_box);
+    info.tag = Some((0, 1));
+    builder.push_rect(&info,
+                      &scroll_space_and_clip,
+                      ColorF::new(0.9, 0.9, 0.91, 1.0));
 
     show_text(&api,
               font_key,
               text_size,
               font_instance_key,
               &mut builder,
-              &space_and_clip,
+              &scroll_space_and_clip,
               text.as_str(),
-              LayoutPoint::new(100.0, 100.0));
+              LayoutPoint::new(0.0, 0.0));
 
     builder.pop_stacking_context();
 
@@ -118,12 +137,38 @@ fn run_events_loop() {
     txn.generate_frame();
     api.send_transaction(document_id, txn);
 
+    let mut cursor_position = webrender::api::WorldPoint::zero();
     events_loop.run_forever(|event| {
         match event {
             Event::Awakened => {},
             Event::WindowEvent { event: window_event, .. } => match window_event {
                 glutin::WindowEvent::CloseRequested => {
                     return glutin::ControlFlow::Break;
+                }
+                glutin::WindowEvent::CursorMoved {
+                    position: glutin::dpi::LogicalPosition { x, y },
+                    ..
+                } => {
+                    cursor_position = webrender::api::WorldPoint::new(x as f32, y as f32);
+                    return glutin::ControlFlow::Continue;
+                }
+                glutin::WindowEvent::MouseWheel { delta, .. } => {
+                    const LINE_HEIGHT: f32 = 38.0;
+                    let (dx, dy) = match delta {
+                        glutin::MouseScrollDelta::LineDelta(dx, dy) => (dx, dy * LINE_HEIGHT),
+                        glutin::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                    };
+
+                    let mut txn = Transaction::new();
+                    txn.scroll(
+                        webrender::api::ScrollLocation::Delta(webrender::api::LayoutVector2D::new(
+                            dx, dy,
+                        )),
+                        cursor_position,
+                    );
+                    txn.generate_frame();
+
+                    api.send_transaction(document_id, txn);
                 }
                 _ => {}
             },
@@ -171,7 +216,7 @@ fn show_text(api: &RenderApi,
 }
 
 fn get_text() -> String {
-    let mut f = File::open("resources/Main.java").unwrap();
+    let mut f = File::open("resources/Either.java").unwrap();
     let mut content = String::new();
     f.read_to_string(&mut content).unwrap();
     return content
