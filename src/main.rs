@@ -11,6 +11,7 @@ use glutin::GlContext;
 use glutin::GlWindow;
 use webrender::api::*;
 use webrender::Renderer;
+use webrender::DebugFlags;
 
 use euclid::TypedPoint2D;
 
@@ -23,7 +24,7 @@ fn create_window(events_loop: &EventsLoop) -> GlWindow {
     let window_builder = glutin::WindowBuilder::new()
         .with_title("photon")
         .with_resizable(false)
-        .with_dimensions((800, 600).into());
+        .with_dimensions((1250, 900).into());
     let context = glutin::ContextBuilder::new()
         .with_vsync(false)
         .with_multisampling(4)
@@ -145,6 +146,20 @@ fn run_events_loop() {
                 glutin::WindowEvent::CloseRequested => {
                     return glutin::ControlFlow::Break;
                 }
+
+                glutin::WindowEvent::KeyboardInput {
+                    input: glutin::KeyboardInput {
+                        state: glutin::ElementState::Pressed,
+                        virtual_keycode: Some(glutin::VirtualKeyCode::P),
+                        ..
+                    },
+                    ..
+                } => {
+                    let mut debug_flags = renderer.get_debug_flags();
+                    debug_flags.toggle(DebugFlags::PROFILER_DBG);
+                    api.send_debug_cmd(DebugCommand::SetFlags(debug_flags));
+                    return glutin::ControlFlow::Continue;
+                }
                 glutin::WindowEvent::CursorMoved {
                     position: glutin::dpi::LogicalPosition { x, y },
                     ..
@@ -216,7 +231,7 @@ fn show_text(api: &RenderApi,
 }
 
 fn get_text() -> String {
-    let mut f = File::open("resources/Either.java").unwrap();
+    let mut f = File::open("resources/EditorImpl.java").unwrap();
     let mut content = String::new();
     f.read_to_string(&mut content).unwrap();
     return content
