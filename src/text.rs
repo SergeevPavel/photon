@@ -88,3 +88,38 @@ pub fn layout_simple_ascii(
 
     (indices, positions, bounding_rect)
 }
+
+
+pub fn show_text(api: &RenderApi,
+             font_key: FontKey,
+             text_size: i32,
+             font_instance_key: FontInstanceKey,
+             builder: &mut DisplayListBuilder,
+             space_and_clip: &SpaceAndClipInfo,
+             text: &str,
+             origin: LayoutPoint) {
+    let (indices, positions, bounding_rect) = layout_simple_ascii(&api,
+                                                                  font_key,
+                                                                  font_instance_key,
+                                                                  text,
+                                                                  Au::from_px(text_size),
+                                                                  origin,
+                                                                  FontInstanceFlags::default());
+    let glyphs: Vec<GlyphInstance> = indices.iter().zip(positions)
+        .map(|(idx, pos)| GlyphInstance { index: *idx, point: pos })
+        .collect();
+    let info = LayoutPrimitiveInfo::new(bounding_rect);
+
+//    for g in glyphs {
+//        builder.push_rect(&LayoutPrimitiveInfo::new(LayoutRect::new(g.point, euclid::TypedSize2D::new(3.0, 3.0))), space_and_clip, ColorF::BLACK);
+//    }
+
+    builder.push_text(
+        &info,
+        &space_and_clip,
+        glyphs.as_slice(),
+        font_instance_key,
+        ColorF::BLACK,
+        None,
+    );
+}

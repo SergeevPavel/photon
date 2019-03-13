@@ -1,24 +1,21 @@
-
 extern crate euclid;
 
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
 
+use app_units::Au;
 use glutin::Event;
 use glutin::EventsLoop;
 use glutin::GlContext;
 use glutin::GlWindow;
 use webrender::api::*;
-use webrender::Renderer;
 use webrender::DebugFlags;
-
-use euclid::TypedPoint2D;
-
-mod text;
+use webrender::Renderer;
 
 use text::*;
-use app_units::Au;
+use std::time::SystemTime;
+
+mod text;
 
 fn create_window(events_loop: &EventsLoop) -> GlWindow {
     let window_builder = glutin::WindowBuilder::new()
@@ -26,8 +23,9 @@ fn create_window(events_loop: &EventsLoop) -> GlWindow {
         .with_resizable(false)
         .with_dimensions((1250, 900).into());
     let context = glutin::ContextBuilder::new()
-        .with_vsync(false)
-        .with_multisampling(4)
+        .with_vsync(true)
+        .with_double_buffer(Some(true))
+//        .with_multisampling(4)
         .with_srgb(true);
     return GlWindow::new(window_builder, context, &events_loop).unwrap();
 }
@@ -42,7 +40,7 @@ fn create_webrender(gl_window: &GlWindow, events_loop: &EventsLoop) -> (Renderer
         },
         glutin::Api::WebGl => unimplemented!(),
     };
-    let mut device_pixel_ratio = gl_window.get_hidpi_factor();
+    let device_pixel_ratio = gl_window.get_hidpi_factor();
     let opts = webrender::RendererOptions {
         device_pixel_ratio: device_pixel_ratio as f32,
         ..webrender::RendererOptions::default()
@@ -68,7 +66,7 @@ fn init_font(api: &RenderApi, document_id: DocumentId, pipeline_id: PipelineId, 
     return (font_key, font_instance_key);
 }
 
-fn run_events_loop() {
+fn run_event_loop() {
     let mut events_loop = EventsLoop::new();
     let gl_window = create_window(&events_loop);
     unsafe {
@@ -91,13 +89,13 @@ fn run_events_loop() {
     let layout_size = framebuffer_size.to_f32() / euclid::TypedScale::new(gl_window.get_hidpi_factor() as f32);
     let mut builder = DisplayListBuilder::new(pipeline_id, layout_size);
 
-    let mut info = LayoutPrimitiveInfo::new(LayoutRect::new(LayoutPoint::zero(), builder.content_size()));
+    let info = LayoutPrimitiveInfo::new(LayoutRect::new(LayoutPoint::zero(), builder.content_size()));
     let root_space_and_clip = SpaceAndClipInfo::root_scroll(pipeline_id);
     builder.push_simple_stacking_context(&info, root_space_and_clip.spatial_id);
 
     let scroll_content_box = euclid::TypedRect::new(
         euclid::TypedPoint2D::zero(),
-        euclid::TypedSize2D::new(100000.0, 100000.0),
+        euclid::TypedSize2D::new(2000.0, 50000.0),
     );
     let scroll_space_and_clip = builder.define_scroll_frame(
         &root_space_and_clip,
@@ -139,35 +137,57 @@ fn run_events_loop() {
     api.send_transaction(document_id, txn);
 
     let mut cursor_position = webrender::api::WorldPoint::zero();
+    let mut perf_log = vec![];
+    let mut base_time = SystemTime::now();
+
     events_loop.run_forever(|event| {
+        let mut need_repaint = false;
+
         match event {
-            Event::Awakened => {},
+            Event::Awakened => {
+                perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "Awakened"));
+                need_repaint = true;
+            },
             Event::WindowEvent { event: window_event, .. } => match window_event {
-                glutin::WindowEvent::CloseRequested => {
+                glutin::WindowEvent::CloseRequested
+                => {
                     return glutin::ControlFlow::Break;
                 }
 
                 glutin::WindowEvent::KeyboardInput {
                     input: glutin::KeyboardInput {
                         state: glutin::ElementState::Pressed,
-                        virtual_keycode: Some(glutin::VirtualKeyCode::P),
+                        virtual_keycode: Some(code),
                         ..
                     },
                     ..
                 } => {
-                    let mut debug_flags = renderer.get_debug_flags();
-                    debug_flags.toggle(DebugFlags::PROFILER_DBG);
-                    api.send_debug_cmd(DebugCommand::SetFlags(debug_flags));
-                    return glutin::ControlFlow::Continue;
+                    match code {
+                        glutin::VirtualKeyCode::P => {
+                            let mut debug_flags = renderer.get_debug_flags();
+                            debug_flags.toggle(DebugFlags::PROFILER_DBG);
+                            debug_flags.toggle(DebugFlags::GPU_TIME_QUERIES);
+                            api.send_debug_cmd(DebugCommand::SetFlags(debug_flags));
+                        }
+                        glutin::VirtualKeyCode::D => {
+                            for e in &perf_log {
+                                println!("{:?}", e);
+                            }
+                            perf_log.clear();
+                            base_time = SystemTime::now()
+                        }
+                        _ => {}
+                    }
                 }
                 glutin::WindowEvent::CursorMoved {
                     position: glutin::dpi::LogicalPosition { x, y },
                     ..
                 } => {
                     cursor_position = webrender::api::WorldPoint::new(x as f32, y as f32);
-                    return glutin::ControlFlow::Continue;
                 }
-                glutin::WindowEvent::MouseWheel { delta, .. } => {
+                glutin::WindowEvent::MouseWheel { delta, ..
+                } => {
+                    perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "MouseWheel"));
                     const LINE_HEIGHT: f32 = 38.0;
                     let (dx, dy) = match delta {
                         glutin::MouseScrollDelta::LineDelta(dx, dy) => (dx, dy * LINE_HEIGHT),
@@ -190,48 +210,23 @@ fn run_events_loop() {
             _ => {}
         }
 
+        if need_repaint {
+            perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "Begin render"));
+            renderer.update();
+            renderer.flush_pipeline_info();
+            renderer.render(framebuffer_size).unwrap();
+            gl_window.swap_buffers().unwrap();
+            perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "End render"));
+        }
 
-        renderer.update();
-        renderer.render(framebuffer_size);
-        let pp_info = renderer.flush_pipeline_info();
-        gl_window.swap_buffers().unwrap();
         return glutin::ControlFlow::Continue;
     });
 
     renderer.deinit();
 }
 
-fn show_text(api: &RenderApi,
-             font_key: FontKey,
-             text_size: i32,
-             font_instance_key: FontInstanceKey,
-             builder: &mut DisplayListBuilder,
-             space_and_clip: &SpaceAndClipInfo,
-             text: &str,
-             origin: LayoutPoint) {
-    let (indices, positions, bounding_rect) = layout_simple_ascii(&api,
-                                                                  font_key,
-                                                                  font_instance_key,
-                                                                  text,
-                                                                  Au::from_px(text_size),
-                                                                  origin,
-                                                                  FontInstanceFlags::default());
-    let glyphs: Vec<GlyphInstance> = indices.iter().zip(positions)
-        .map(|(idx, pos)| GlyphInstance { index: *idx, point: pos })
-        .collect();
-    let info = LayoutPrimitiveInfo::new(bounding_rect);
-    builder.push_text(
-        &info,
-        &space_and_clip,
-        glyphs.as_slice(),
-        font_instance_key,
-        ColorF::BLACK,
-        None,
-    );
-}
-
 fn get_text() -> String {
-    let mut f = File::open("resources/EditorImpl.java").unwrap();
+    let mut f = File::open("resources/Either.java").unwrap();
     let mut content = String::new();
     f.read_to_string(&mut content).unwrap();
     return content
@@ -239,7 +234,7 @@ fn get_text() -> String {
 
 fn main() -> std::io::Result<()> {
     env_logger::init();
-    run_events_loop();
+    run_event_loop();
 
     return Ok(());
 }
@@ -262,7 +257,7 @@ impl webrender::api::RenderNotifier for Notifier {
     }
 
     fn wake_up(&self) {
-        self.events_proxy.wakeup().ok();
+        self.events_proxy.wakeup();
     }
 
     fn new_frame_ready(
