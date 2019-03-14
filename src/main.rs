@@ -95,7 +95,7 @@ fn run_event_loop() {
 
     let scroll_content_box = euclid::TypedRect::new(
         euclid::TypedPoint2D::zero(),
-        euclid::TypedSize2D::new(2000.0, 50000.0),
+        euclid::TypedSize2D::new(2000.0, 100000.0),
     );
     let scroll_space_and_clip = builder.define_scroll_frame(
         &root_space_and_clip,
@@ -120,7 +120,7 @@ fn run_event_loop() {
               &mut builder,
               &scroll_space_and_clip,
               text.as_str(),
-              LayoutPoint::new(0.0, 0.0));
+              LayoutPoint::new(0.0, text_size as f32));
 
     builder.pop_stacking_context();
 
@@ -226,7 +226,7 @@ fn run_event_loop() {
 }
 
 fn get_text() -> String {
-    let mut f = File::open("resources/Either.java").unwrap();
+    let mut f = File::open("resources/EditorImpl.java").unwrap();
     let mut content = String::new();
     f.read_to_string(&mut content).unwrap();
     return content

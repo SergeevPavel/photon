@@ -58,28 +58,21 @@ pub fn layout_simple_ascii(
         )
     };
 
-    let vertical_direction = LayoutVector2D::new(0.0, size.to_f32_px() + 4.0);
-
     for (ch, metric) in text.chars().zip(metrics) {
         positions.push(cursor);
 
-        if ch == '\n' {
-            cursor += vertical_direction;
-            cursor.x = origin.x;
-        } else {
-            match metric {
-                Some(metric) => {
-                    let glyph_rect = LayoutRect::new(
-                        LayoutPoint::new(cursor.x + metric.left as f32, cursor.y - metric.top as f32),
-                        LayoutSize::new(metric.width as f32, metric.height as f32)
-                    );
-                    bounding_rect = bounding_rect.union(&glyph_rect);
-                    cursor += horizontal_direction * metric.advance;
-                }
-                None => {
-                    let space_advance = size.to_f32_px() / 3.0;
-                    cursor += horizontal_direction * space_advance;
-                }
+        match metric {
+            Some(metric) => {
+                let glyph_rect = LayoutRect::new(
+                    LayoutPoint::new(cursor.x + metric.left as f32, cursor.y - metric.top as f32),
+                    LayoutSize::new(metric.width as f32, metric.height as f32)
+                );
+                bounding_rect = bounding_rect.union(&glyph_rect);
+                cursor += horizontal_direction * metric.advance;
+            }
+            None => {
+                let space_advance = size.to_f32_px() / 3.0;
+                cursor += horizontal_direction * space_advance;
             }
         }
     }
@@ -91,35 +84,40 @@ pub fn layout_simple_ascii(
 
 
 pub fn show_text(api: &RenderApi,
-             font_key: FontKey,
-             text_size: i32,
-             font_instance_key: FontInstanceKey,
-             builder: &mut DisplayListBuilder,
-             space_and_clip: &SpaceAndClipInfo,
-             text: &str,
-             origin: LayoutPoint) {
-    let (indices, positions, bounding_rect) = layout_simple_ascii(&api,
-                                                                  font_key,
-                                                                  font_instance_key,
-                                                                  text,
-                                                                  Au::from_px(text_size),
-                                                                  origin,
-                                                                  FontInstanceFlags::default());
-    let glyphs: Vec<GlyphInstance> = indices.iter().zip(positions)
-        .map(|(idx, pos)| GlyphInstance { index: *idx, point: pos })
-        .collect();
-    let info = LayoutPrimitiveInfo::new(bounding_rect);
+                 font_key: FontKey,
+                 text_size: i32,
+                 font_instance_key: FontInstanceKey,
+                 builder: &mut DisplayListBuilder,
+                 space_and_clip: &SpaceAndClipInfo,
+                 text: &str,
+                 origin: LayoutPoint) {
 
+    let mut line_origin = origin;
+    let vertical_direction = LayoutVector2D::new(0.0, Au::from_px(text_size).to_f32_px() + 4.0);
+    for line in text.split_terminator("\n") {
+        let (indices, positions, bounding_rect) = layout_simple_ascii(&api,
+                                                                      font_key,
+                                                                      font_instance_key,
+                                                                      line,
+                                                                      Au::from_px(text_size),
+                                                                      line_origin,
+                                                                      FontInstanceFlags::default());
+        let glyphs: Vec<GlyphInstance> = indices.iter().zip(positions)
+            .map(|(idx, pos)| GlyphInstance { index: *idx, point: pos })
+            .collect();
+        let info = LayoutPrimitiveInfo::new(bounding_rect);
+        builder.push_text(
+            &info,
+            &space_and_clip,
+            glyphs.as_slice(),
+            font_instance_key,
+            ColorF::BLACK,
+            None,
+        );
+        line_origin += vertical_direction;
+    }
 //    for g in glyphs {
 //        builder.push_rect(&LayoutPrimitiveInfo::new(LayoutRect::new(g.point, euclid::TypedSize2D::new(3.0, 3.0))), space_and_clip, ColorF::BLACK);
 //    }
 
-    builder.push_text(
-        &info,
-        &space_and_clip,
-        glyphs.as_slice(),
-        font_instance_key,
-        ColorF::BLACK,
-        None,
-    );
 }
