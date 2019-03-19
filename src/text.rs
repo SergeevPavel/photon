@@ -6,6 +6,7 @@ use app_units::Au;
 use webrender::api::*;
 
 pub fn add_font<P: AsRef<Path>>(api: &RenderApi, txn: &mut Transaction, path: P) -> FontKey {
+
     let mut file = File::open(path).unwrap();
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer).unwrap();
@@ -23,6 +24,15 @@ pub fn add_font_instance(api: &RenderApi, txn: &mut Transaction, font_key: FontK
                           None,
                           Vec::new());
     return font_instance_key;
+}
+
+pub fn init_font(api: &RenderApi, pipeline_id: PipelineId, document_id: DocumentId, font_size: i32) -> (FontKey, FontInstanceKey) {
+    let mut txn = Transaction::new();
+    txn.set_root_pipeline(pipeline_id);
+    let font_key = add_font(&api, &mut txn, "resources/Fira Code/ttf/FiraCode-Medium.ttf");
+    let font_instance_key = add_font_instance(&api, &mut txn, font_key, font_size);
+    api.send_transaction(document_id, txn);
+    return (font_key, font_instance_key);
 }
 
 pub fn layout_simple_ascii(
@@ -91,7 +101,6 @@ pub fn show_text(api: &RenderApi,
                  space_and_clip: &SpaceAndClipInfo,
                  text: &str,
                  origin: LayoutPoint) {
-
     let mut line_origin = origin;
     let vertical_direction = LayoutVector2D::new(0.0, Au::from_px(text_size).to_f32_px() + 4.0);
     for line in text.split_terminator("\n") {

@@ -1,4 +1,8 @@
 extern crate euclid;
+extern crate byteorder;
+
+mod text;
+mod dom;
 
 use std::fs::File;
 use std::io::Read;
@@ -14,8 +18,6 @@ use webrender::Renderer;
 
 use text::*;
 use std::time::SystemTime;
-
-mod text;
 
 fn create_window(events_loop: &EventsLoop) -> GlWindow {
     let window_builder = glutin::WindowBuilder::new()
@@ -57,36 +59,17 @@ fn framebuffer_size(gl_window: &GlWindow) -> webrender::api::DeviceIntSize {
     webrender::api::DeviceIntSize::new(size.width as i32, size.height as i32)
 }
 
-fn init_font(api: &RenderApi, document_id: DocumentId, pipeline_id: PipelineId, font_size: i32) -> (FontKey, FontInstanceKey) {
-    let mut txn = Transaction::new();
-    txn.set_root_pipeline(pipeline_id);
-    let font_key = text::add_font(&api, &mut txn, "resources/Fira Code/ttf/FiraCode-Medium.ttf");
-    let font_instance_key = add_font_instance(&api, &mut txn, font_key, font_size);
-    api.send_transaction(document_id, txn);
-    return (font_key, font_instance_key);
-}
-
-fn run_event_loop() {
-    let mut events_loop = EventsLoop::new();
-    let gl_window = create_window(&events_loop);
-    unsafe {
-        gl_window.make_current().unwrap();
-    }
-
-    let (mut renderer, sender) = create_webrender(&gl_window, &events_loop);
-    let api = sender.create_api();
-
-    let framebuffer_size = framebuffer_size(&gl_window);
-    let document_id = api.add_document(framebuffer_size, 0);
-    let pipeline_id = webrender::api::PipelineId(0, 0);
-    let epoch = Epoch(0);
-
+fn render_text_from_file(api: &RenderApi,
+                         pipeline_id: PipelineId,
+                         document_id: DocumentId,
+                         layout_size: LayoutSize,
+                         epoch: &mut Epoch,
+                         file_path: String) {
     let text_size = 16;
-    let text = get_text();
-    let (font_key, font_instance_key) = init_font(&api, document_id, pipeline_id, text_size);
+    let text = get_text(file_path);
+    let (font_key, font_instance_key) = text::init_font(&api, pipeline_id, document_id, text_size);
 
     let mut txn = Transaction::new();
-    let layout_size = framebuffer_size.to_f32() / euclid::TypedScale::new(gl_window.get_hidpi_factor() as f32);
     let mut builder = DisplayListBuilder::new(pipeline_id, layout_size);
 
     let info = LayoutPrimitiveInfo::new(LayoutRect::new(LayoutPoint::zero(), builder.content_size()));
@@ -97,6 +80,7 @@ fn run_event_loop() {
         euclid::TypedPoint2D::zero(),
         euclid::TypedSize2D::new(2000.0, 100000.0),
     );
+
     let scroll_space_and_clip = builder.define_scroll_frame(
         &root_space_and_clip,
         None,
@@ -123,9 +107,10 @@ fn run_event_loop() {
               LayoutPoint::new(0.0, text_size as f32));
 
     builder.pop_stacking_context();
+    epoch.0 += 1;
 
     txn.set_display_list(
-        epoch,
+        epoch.clone(),
         None,
         layout_size,
         builder.finalize(),
@@ -135,6 +120,26 @@ fn run_event_loop() {
     txn.set_root_pipeline(pipeline_id);
     txn.generate_frame();
     api.send_transaction(document_id, txn);
+}
+
+fn run_event_loop() {
+    let mut events_loop = EventsLoop::new();
+    let gl_window = create_window(&events_loop);
+    unsafe {
+        gl_window.make_current().unwrap();
+    }
+
+    let (mut renderer, sender) = create_webrender(&gl_window, &events_loop);
+    let api = sender.create_api();
+
+    let framebuffer_size = framebuffer_size(&gl_window);
+    let layout_size: LayoutSize = framebuffer_size.to_f32() / euclid::TypedScale::new(gl_window.get_hidpi_factor() as f32);
+    let document_id = api.add_document(framebuffer_size, 0);
+    let pipeline_id = webrender::api::PipelineId(0, 0);
+    let mut epoch = Epoch(0);
+
+//    render_text_from_file(&api, pipeline_id, document_id, layout_size, &mut epoch, "resources/EditorImpl.java".to_string(),);
+    dom::Updater::spawn(sender.create_api(), pipeline_id, document_id, layout_size);
 
     let mut cursor_position = webrender::api::WorldPoint::zero();
     let mut perf_log = vec![];
@@ -225,8 +230,8 @@ fn run_event_loop() {
     renderer.deinit();
 }
 
-fn get_text() -> String {
-    let mut f = File::open("resources/EditorImpl.java").unwrap();
+fn get_text(file_path: String) -> String {
+    let mut f = File::open(file_path).unwrap();
     let mut content = String::new();
     f.read_to_string(&mut content).unwrap();
     return content
