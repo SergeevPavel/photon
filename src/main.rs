@@ -85,7 +85,7 @@ fn render_text_from_file(api: &RenderApi,
         &root_space_and_clip,
         None,
         scroll_content_box,
-        euclid::TypedRect::new(euclid::TypedPoint2D::zero(), layout_size),
+        euclid::rect(0.0, 0.0, 600.0, 600.0),  //euclid::TypedRect::new(euclid::TypedPoint2D::zero(), layout_size),
         vec![],
         None,
         webrender::api::ScrollSensitivity::ScriptAndInputEvents,
@@ -95,7 +95,8 @@ fn render_text_from_file(api: &RenderApi,
     info.tag = Some((0, 1));
     builder.push_rect(&info,
                       &scroll_space_and_clip,
-                      ColorF::new(0.9, 0.9, 0.91, 1.0));
+                      ColorF::new(0.9, 0.9, 0.91, 1.0)
+    );
 
     show_text(&api,
               font_key,
@@ -189,6 +190,12 @@ fn run_event_loop() {
                     ..
                 } => {
                     cursor_position = webrender::api::WorldPoint::new(x as f32, y as f32);
+                }
+                glutin::WindowEvent::MouseInput {
+                    state, button, ..
+                } => {
+                    let hit_result = api.hit_test(document_id, Some(pipeline_id), cursor_position, HitTestFlags::empty());
+                    println!("{:?}", hit_result);
                 }
                 glutin::WindowEvent::MouseWheel { delta, ..
                 } => {
