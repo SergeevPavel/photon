@@ -1,7 +1,7 @@
 use std::thread;
 
 use std::io::prelude::*;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs, Shutdown};
 
 use byteorder::{ReadBytesExt, BigEndian};
 use serde_json::Value;
@@ -10,12 +10,17 @@ use std::collections::HashMap;
 
 use crate::text;
 use euclid::TypedSize2D;
+use std::sync::{Mutex, Arc};
+use serde::Serialize;
 
-fn read_msg(stream: &mut TcpStream) -> Vec<u8> {
+fn read_msg(stream: &mut TcpStream) -> Option<Vec<u8>> {
     let size = stream.read_u32::<BigEndian>().unwrap();
     let mut buf = vec![0u8; size as usize];
-    stream.read_exact(&mut buf);
-    buf
+    if stream.read_exact(&mut buf).is_ok() {
+        Some(buf)
+    } else {
+        None
+    }
 }
 
 type NodeId = u64;
@@ -51,7 +56,6 @@ enum NodeType {
     Scroll { position: LayoutRect,
              content: LayoutRect,
              on_wheel: Callback },
-    Unknown
 }
 
 fn parse_rect(value: &Value) -> LayoutRect {
@@ -64,6 +68,22 @@ fn parse_rect(value: &Value) -> LayoutRect {
 fn parse_point(value: &Value) -> LayoutPoint {
     LayoutPoint::new(value["x"].as_f64().unwrap() as f32,
                      value["y"].as_f64().unwrap() as f32)
+}
+
+fn parse_callback(value: &Value) -> Callback {
+    match value.as_str().unwrap() {
+        "noria-handler-sync" => { Callback::Sync }
+        "noria-handler-async" => { Callback::Async }
+        "-noria-handler" => { Callback::None }
+        _ => unreachable!()
+    }
+}
+
+#[derive(Serialize)]
+struct CallbackMessage<'a, T: Serialize> {
+    node: NodeId,
+    key: &'a str,
+    arguments: T,
 }
 
 impl NodeType {
@@ -105,7 +125,7 @@ impl NodeType {
             NodeType::Root => {
 
             }
-            NodeType::Div { ref mut color, rect } => {
+            NodeType::Div { ref mut color, rect, on_click } => {
                 match attribute {
                     "color" => {
                         *color = ColorF::WHITE; // parse color
@@ -113,8 +133,11 @@ impl NodeType {
                     "rect" => {
                         *rect = parse_rect(value);
                     }
+                    "on-click" => {
+                        *on_click = parse_callback(value);
+                    }
 
-                    _ => {}
+                    _ => ()
                 }
             }
             NodeType::Scroll { ref mut position, content, on_wheel } => {
@@ -127,15 +150,10 @@ impl NodeType {
                     }
 
                     "on-wheel" => {
-                        *on_wheel = match value.as_str().unwrap() {
-                            "noria-handler-sync" => { Callback::Sync }
-                            "noria-handler-async" => { Callback::Async }
-                            "-noria-handler" => { Callback::None }
-                            _ => unreachable!()
-                        }
+                        *on_wheel = parse_callback(value);
                     }
 
-                    _ => {}
+                    _ => ()
                 }
             }
             NodeType::Text { ref mut text, origin } => {
@@ -146,10 +164,9 @@ impl NodeType {
                     "origin" => {
                         *origin = parse_point(value);
                     }
-                    _ => {}
+                    _ => ()
                 }
             }
-            _ => {}
         }
     }
 
@@ -191,7 +208,6 @@ impl NodeType {
                     },
                     do_aa: true
                 });
-//                context.builder.push_rect(&info, &space_and_clip, ColorF::BLACK);
                 if on_click.is_some() {
                     info.tag = Some((node_id, 0));
                 }
@@ -230,7 +246,6 @@ impl NodeType {
                     unreachable!("No parent space and clip");
                 }
             }
-            _ => {}
         }
     }
 
@@ -249,7 +264,39 @@ impl NodeType {
                 assert!(context.space_and_clip_stack.pop().is_some());
             }
 
-            _ => {}
+            _ => ()
+        }
+    }
+
+    fn on_click(&self, stream: &mut TcpStream, node_id: NodeId, point: &LayoutPoint) {
+        match self {
+            NodeType::Div { on_click, .. } => {
+                if on_click.is_some() {
+                    let msg = CallbackMessage {
+                        node: node_id,
+                        key: "on-click",
+                        arguments: vec![point.x, point.y]
+                    };
+                    stream.write(serde_json::to_string(&msg).unwrap().as_bytes());
+                }
+            }
+            _ => ()
+        }
+    }
+
+    fn on_wheel(&self, stream: &mut TcpStream, node_id: NodeId, delta: &LayoutVector2D) {
+        match self {
+            NodeType::Scroll { on_wheel, .. } => {
+                if on_wheel.is_some() {
+                    let msg = CallbackMessage {
+                        node: node_id,
+                        key: "on-wheel",
+                        arguments: vec![delta.x, delta.y]
+                    };
+                    stream.write(serde_json::to_string(&msg).unwrap().as_bytes());
+                }
+            }
+            _ => ()
         }
     }
 }
@@ -282,7 +329,7 @@ impl Node {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Dom {
     nodes: HashMap<NodeId, Node>,
     root_node: Option<NodeId>,
@@ -337,15 +384,15 @@ fn apply_updates(dom: &mut Dom, message: Vec<u8>) {
                     let node = dom.nodes.get_mut(&node_id).unwrap();
                     node.node_type.set_attr(attribute, &update["value"]);
                 }
-                _ => {}
+                _ => ()
             }
             println!("{:?}", update);
         }
     }
 }
 
-pub struct Updater {
-    dom: Dom,
+pub struct NoriaClient {
+    dom_mutex: Arc<Mutex<Dom>>,
     api: RenderApi,
     pipeline_id: PipelineId,
     document_id: DocumentId,
@@ -355,15 +402,41 @@ pub struct Updater {
     default_font_instance_key: FontInstanceKey,
 }
 
-impl Updater {
-    pub fn spawn(api: RenderApi, pipeline_id: PipelineId, document_id: DocumentId, content_size: LayoutSize) {
+pub struct Controller {
+    dom_mutex: Arc<Mutex<Dom>>,
+    stream: TcpStream
+}
+
+impl Controller {
+    pub fn mouse_click(&mut self, hit_result: HitTestResult) {
+        for item in hit_result.items {
+            let (node_id, _) = item.tag;
+            let dom = self.dom_mutex.lock().unwrap();
+            let node_type = &dom.nodes.get(&node_id).unwrap().node_type;
+            node_type.on_click(&mut self.stream, node_id, &item.point_relative_to_item);
+
+        }
+    }
+
+    pub fn mouse_wheel(&mut self, hit_result: HitTestResult, delta: LayoutVector2D) {
+        for item in hit_result.items {
+            let (node_id, _) = item.tag;
+            let dom = self.dom_mutex.lock().unwrap();
+            let node_type = &dom.nodes.get(&node_id).unwrap().node_type;
+            node_type.on_wheel(&mut self.stream, node_id, &delta);
+        }
+    }
+}
+
+impl NoriaClient {
+    pub fn spawn<A: ToSocketAddrs>(addr: A, api: RenderApi, pipeline_id: PipelineId, document_id: DocumentId, content_size: LayoutSize) -> Controller {
         let default_font_size = 16;
         let (default_font_key, default_font_instance_key) = text::init_font(&api, pipeline_id, document_id, default_font_size);
-        let mut updater = Updater {
-            dom: Dom {
-                nodes: HashMap::new(),
-                root_node: None,
-            },
+
+        let dom_mutex = Arc::new(Mutex::new(Dom::default()));
+
+        let mut updater = NoriaClient {
+            dom_mutex: dom_mutex.clone(),
             api,
             pipeline_id,
             document_id,
@@ -372,28 +445,37 @@ impl Updater {
             default_font_key,
             default_font_instance_key
         };
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_nodelay(true).unwrap();
+        stream.write("{kind : \"webrender\"}".as_bytes());
 
+        let mut read_stream = stream.try_clone().unwrap();
         std::thread::spawn(move || {
             let mut epoch = Epoch(0);
-            let mut stream = TcpStream::connect("127.0.0.1:61567").unwrap();
-            stream.set_nodelay(true);
-            stream.write("{kind : \"webrender\"}".as_bytes());
-
             loop {
-                let msg = read_msg(&mut stream);
-                apply_updates(&mut updater.dom, msg);
-                updater.update(epoch);
-                epoch.0 += 1;
+                let msg = read_msg(&mut read_stream);
+                if let Some(msg) = msg {
+                    let mut dom = updater.dom_mutex.lock().unwrap();
+                    apply_updates(&mut dom, msg);
+                    updater.update(&mut dom, epoch);
+                    epoch.0 += 1;
+                } else {
+                    break;
+                }
             }
         });
+        Controller {
+            dom_mutex: dom_mutex,
+            stream: stream
+        }
     }
 
-    fn update(&self, epoch: Epoch) {
-        if let Some(root_node_id) = self.dom.root_node {
+    fn update(&self, dom: &Dom, epoch: Epoch) {
+        if let Some(root_node_id) = dom.root_node {
             let mut txn = Transaction::new();
             let mut builder = DisplayListBuilder::new(self.pipeline_id, self.content_size);
             let mut visitor_context = VisitorContext {
-                nodes: &self.dom.nodes,
+                nodes: &dom.nodes,
                 builder: builder,
                 space_and_clip_stack: Vec::new(),
                 default_font_key: self.default_font_key,
@@ -402,7 +484,7 @@ impl Updater {
                 api: &self.api,
             };
 
-            self.dom.nodes.get(&root_node_id).unwrap().visit(&mut visitor_context);
+            dom.nodes.get(&root_node_id).unwrap().visit(&mut visitor_context);
 
             txn.set_display_list(
                 epoch,

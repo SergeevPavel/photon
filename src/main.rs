@@ -7,8 +7,7 @@ mod dom;
 use std::fs::File;
 use std::io::Read;
 
-use app_units::Au;
-use glutin::Event;
+use glutin::{Event, ElementState, MouseButton};
 use glutin::EventsLoop;
 use glutin::GlContext;
 use glutin::GlWindow;
@@ -18,6 +17,8 @@ use webrender::Renderer;
 
 use text::*;
 use std::time::SystemTime;
+use std::env;
+use std::net::ToSocketAddrs;
 
 fn create_window(events_loop: &EventsLoop) -> GlWindow {
     let window_builder = glutin::WindowBuilder::new()
@@ -123,7 +124,7 @@ fn render_text_from_file(api: &RenderApi,
     api.send_transaction(document_id, txn);
 }
 
-fn run_event_loop() {
+fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
     let mut events_loop = EventsLoop::new();
     let gl_window = create_window(&events_loop);
     unsafe {
@@ -137,10 +138,10 @@ fn run_event_loop() {
     let layout_size: LayoutSize = framebuffer_size.to_f32() / euclid::TypedScale::new(gl_window.get_hidpi_factor() as f32);
     let document_id = api.add_document(framebuffer_size, 0);
     let pipeline_id = webrender::api::PipelineId(0, 0);
-    let mut epoch = Epoch(0);
 
+//    let mut epoch = Epoch(0);
 //    render_text_from_file(&api, pipeline_id, document_id, layout_size, &mut epoch, "resources/EditorImpl.java".to_string(),);
-    dom::Updater::spawn(sender.create_api(), pipeline_id, document_id, layout_size);
+    let mut controller = dom::NoriaClient::spawn(render_server_addr, sender.create_api(), pipeline_id, document_id, layout_size);
 
     let mut cursor_position = webrender::api::WorldPoint::zero();
     let mut perf_log = vec![];
@@ -195,27 +196,29 @@ fn run_event_loop() {
                     state, button, ..
                 } => {
                     let hit_result = api.hit_test(document_id, Some(pipeline_id), cursor_position, HitTestFlags::empty());
-                    println!("{:?}", hit_result);
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        controller.mouse_click(hit_result);
+                    }
                 }
                 glutin::WindowEvent::MouseWheel { delta, ..
                 } => {
                     perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "MouseWheel"));
-                    const LINE_HEIGHT: f32 = 38.0;
-                    let (dx, dy) = match delta {
-                        glutin::MouseScrollDelta::LineDelta(dx, dy) => (dx, dy * LINE_HEIGHT),
-                        glutin::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                    const LINE_HEIGHT: f32 = 38.0; // TODO treat LineDelta in other place?
+                    let delta_vector = match delta {
+                        glutin::MouseScrollDelta::LineDelta(dx, dy) => LayoutVector2D::new(dx, dy * LINE_HEIGHT),
+                        glutin::MouseScrollDelta::PixelDelta(pos) => LayoutVector2D::new(pos.x as f32, pos.y as f32),
                     };
+                    let hit_result = api.hit_test(document_id, Some(pipeline_id), cursor_position, HitTestFlags::empty());
+                    controller.mouse_wheel(hit_result, delta_vector);
 
-                    let mut txn = Transaction::new();
-                    txn.scroll(
-                        webrender::api::ScrollLocation::Delta(webrender::api::LayoutVector2D::new(
-                            dx, dy,
-                        )),
-                        cursor_position,
-                    );
-                    txn.generate_frame();
-
-                    api.send_transaction(document_id, txn);
+//                    let mut txn = Transaction::new();
+//                    txn.scroll(
+//                        webrender::api::ScrollLocation::Delta(delta_vector),
+//                        cursor_position,
+//                    );
+//                    txn.generate_frame();
+//
+//                    api.send_transaction(document_id, txn);
                 }
                 _ => {}
             },
@@ -246,8 +249,11 @@ fn get_text(file_path: String) -> String {
 
 fn main() -> std::io::Result<()> {
     env_logger::init();
-    run_event_loop();
-
+    let args: Vec<String> = env::args().collect();
+    if args.len() >= 2 {
+        let addr = &args[1];
+        run_event_loop(addr);
+    }
     return Ok(());
 }
 
@@ -269,7 +275,7 @@ impl webrender::api::RenderNotifier for Notifier {
     }
 
     fn wake_up(&self) {
-        self.events_proxy.wakeup();
+        self.events_proxy.wakeup().unwrap();
     }
 
     fn new_frame_ready(

@@ -68,7 +68,7 @@ pub fn layout_simple_ascii(
         )
     };
 
-    for (ch, metric) in text.chars().zip(metrics) {
+    for (_ch, metric) in text.chars().zip(metrics) {
         positions.push(cursor);
 
         match metric {
