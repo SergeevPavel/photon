@@ -16,7 +16,7 @@ use webrender::DebugFlags;
 use webrender::Renderer;
 
 use text::*;
-use std::time::SystemTime;
+use std::time::{SystemTime, Instant};
 use std::env;
 use std::net::ToSocketAddrs;
 
@@ -61,6 +61,7 @@ fn framebuffer_size(gl_window: &GlWindow) -> webrender::api::DeviceIntSize {
 }
 
 fn render_text_from_file(api: &RenderApi,
+                         fonts_manager: &FontsManager,
                          pipeline_id: PipelineId,
                          document_id: DocumentId,
                          layout_size: LayoutSize,
@@ -68,7 +69,6 @@ fn render_text_from_file(api: &RenderApi,
                          file_path: String) {
     let text_size = 16;
     let text = get_text(file_path);
-    let (font_key, font_instance_key) = text::init_font(&api, pipeline_id, document_id, text_size);
 
     let mut txn = Transaction::new();
     let mut builder = DisplayListBuilder::new(pipeline_id, layout_size);
@@ -86,7 +86,7 @@ fn render_text_from_file(api: &RenderApi,
         &root_space_and_clip,
         None,
         scroll_content_box,
-        euclid::rect(0.0, 0.0, 600.0, 600.0),  //euclid::TypedRect::new(euclid::TypedPoint2D::zero(), layout_size),
+        euclid::TypedRect::new(euclid::TypedPoint2D::zero(), layout_size),
         vec![],
         None,
         webrender::api::ScrollSensitivity::ScriptAndInputEvents,
@@ -99,14 +99,7 @@ fn render_text_from_file(api: &RenderApi,
                       ColorF::new(0.9, 0.9, 0.91, 1.0)
     );
 
-    show_text(&api,
-              font_key,
-              text_size,
-              font_instance_key,
-              &mut builder,
-              &scroll_space_and_clip,
-              text.as_str(),
-              LayoutPoint::new(0.0, text_size as f32));
+    fonts_manager.show_text(&mut builder, &scroll_space_and_clip, text.as_str(), LayoutPoint::new(0.0, text_size as f32));
 
     builder.pop_stacking_context();
     epoch.0 += 1;
@@ -139,9 +132,10 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
     let document_id = api.add_document(framebuffer_size, 0);
     let pipeline_id = webrender::api::PipelineId(0, 0);
 
+//    let fonts_manager = text::FontsManager::new(sender.create_api(), document_id);
 //    let mut epoch = Epoch(0);
-//    render_text_from_file(&api, pipeline_id, document_id, layout_size, &mut epoch, "resources/EditorImpl.java".to_string(),);
-    let mut controller = dom::NoriaClient::spawn(render_server_addr, sender.create_api(), pipeline_id, document_id, layout_size);
+//    render_text_from_file(&api, &fonts_manager, pipeline_id, document_id, layout_size, &mut epoch, "resources/EditorImpl.java".to_string());
+    let mut controller = dom::NoriaClient::spawn(render_server_addr, sender.clone(), pipeline_id, document_id, layout_size);
 
     let mut cursor_position = webrender::api::WorldPoint::zero();
     let mut perf_log = vec![];
@@ -227,11 +221,16 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
 
         if need_repaint {
             perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "Begin render"));
+            let start = Instant::now();
             renderer.update();
+            perf_log.push((start.elapsed().as_millis(), "Update took"));
+            let start = Instant::now();
             renderer.flush_pipeline_info();
             renderer.render(framebuffer_size).unwrap();
+            perf_log.push((start.elapsed().as_millis(), "Render took"));
+            let start = Instant::now();
             gl_window.swap_buffers().unwrap();
-            perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "End render"));
+            perf_log.push((start.elapsed().as_millis(), "Swap buffers took"));
         }
 
         return glutin::ControlFlow::Continue;
@@ -285,6 +284,7 @@ impl webrender::api::RenderNotifier for Notifier {
         _composite_needed: bool,
         _render_time: Option<u64>,
     ) {
+
         self.wake_up();
     }
 }

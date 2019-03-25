@@ -26,107 +26,120 @@ pub fn add_font_instance(api: &RenderApi, txn: &mut Transaction, font_key: FontK
     return font_instance_key;
 }
 
-pub fn init_font(api: &RenderApi, pipeline_id: PipelineId, document_id: DocumentId, font_size: i32) -> (FontKey, FontInstanceKey) {
-    let mut txn = Transaction::new();
-    txn.set_root_pipeline(pipeline_id);
-    let font_key = add_font(&api, &mut txn, "resources/Fira Code/ttf/FiraCode-Medium.ttf");
-    let font_instance_key = add_font_instance(&api, &mut txn, font_key, font_size);
-    api.send_transaction(document_id, txn);
-    return (font_key, font_instance_key);
+
+#[derive(Debug)]
+pub struct LayoutedText {
+    pub glyphs: Vec<GlyphInstance>,
+    pub bounding_rect: LayoutRect,
 }
 
-pub fn layout_simple_ascii(
-    api: &RenderApi,
-    font_key: FontKey,
-    instance_key: FontInstanceKey,
-    text: &str,
-    size: Au,
-    origin: LayoutPoint,
-    flags: FontInstanceFlags,
-) -> (Vec<u32>, Vec<LayoutPoint>, LayoutRect) {
-    let indices: Vec<u32> = api
-        .get_glyph_indices(font_key, text)
-        .iter()
-        .filter_map(|idx| *idx)
-        .collect();
+pub struct FontsManager {
+    api: RenderApi,
+    pub font_key: FontKey,
+    pub font_instance_key: FontInstanceKey,
+    pub font_size: f32,
+}
 
-    let metrics = api.get_glyph_dimensions(instance_key, indices.clone());
-
-    let mut bounding_rect = LayoutRect::zero();
-    let mut positions = Vec::new();
-
-    let mut cursor = origin;
-    let horizontal_direction = if flags.contains(FontInstanceFlags::TRANSPOSE) {
-        LayoutVector2D::new(
-            0.0,
-            if flags.contains(FontInstanceFlags::FLIP_Y) { -1.0 } else { 1.0 },
-        )
-    } else {
-        LayoutVector2D::new(
-            if flags.contains(FontInstanceFlags::FLIP_X) { -1.0 } else { 1.0 },
-            0.0,
-        )
-    };
-
-    for (_ch, metric) in text.chars().zip(metrics) {
-        positions.push(cursor);
-
-        match metric {
-            Some(metric) => {
-                let glyph_rect = LayoutRect::new(
-                    LayoutPoint::new(cursor.x + metric.left as f32, cursor.y - metric.top as f32),
-                    LayoutSize::new(metric.width as f32, metric.height as f32)
-                );
-                bounding_rect = bounding_rect.union(&glyph_rect);
-                cursor += horizontal_direction * metric.advance;
-            }
-            None => {
-                let space_advance = size.to_f32_px() / 3.0;
-                cursor += horizontal_direction * space_advance;
-            }
+impl FontsManager {
+    pub fn new(api: RenderApi, document_id: DocumentId) -> Self {
+        let font_size = 14.0;
+        let mut txn = Transaction::new();
+        let font_key = add_font(&api, &mut txn, "resources/Fira Code/ttf/FiraCode-Medium.ttf");
+        let font_instance_key = add_font_instance(&api, &mut txn, font_key, font_size as i32);
+        api.send_transaction(document_id, txn);
+        FontsManager {
+            api,
+            font_key,
+            font_instance_key,
+            font_size
         }
     }
 
-    let bounding_rect = bounding_rect.inflate(2.0, 2.0);
+    pub fn layout_simple_ascii(
+        &self,
+        text: &str,
+        origin: LayoutPoint,
+        flags: FontInstanceFlags,
+    ) -> LayoutedText {
+        let indices: Vec<u32> = self.api
+            .get_glyph_indices(self.font_key, text)
+            .iter()
+            .filter_map(|idx| *idx)
+            .collect();
 
-    (indices, positions, bounding_rect)
-}
+        let metrics = self.api.get_glyph_dimensions(self.font_instance_key, indices.clone());
 
+        let mut bounding_rect = LayoutRect::zero();
+        let mut positions = Vec::new();
 
-pub fn show_text(api: &RenderApi,
-                 font_key: FontKey,
-                 text_size: i32,
-                 font_instance_key: FontInstanceKey,
-                 builder: &mut DisplayListBuilder,
-                 space_and_clip: &SpaceAndClipInfo,
-                 text: &str,
-                 origin: LayoutPoint) {
-    let mut line_origin = origin;
-    let vertical_direction = LayoutVector2D::new(0.0, Au::from_px(text_size).to_f32_px() + 4.0);
-    for line in text.split_terminator("\n") {
-        let (indices, positions, bounding_rect) = layout_simple_ascii(&api,
-                                                                      font_key,
-                                                                      font_instance_key,
-                                                                      line,
-                                                                      Au::from_px(text_size),
-                                                                      line_origin,
-                                                                      FontInstanceFlags::default());
+        let mut cursor = origin;
+        let horizontal_direction = if flags.contains(FontInstanceFlags::TRANSPOSE) {
+            LayoutVector2D::new(
+                0.0,
+                if flags.contains(FontInstanceFlags::FLIP_Y) { -1.0 } else { 1.0 },
+            )
+        } else {
+            LayoutVector2D::new(
+                if flags.contains(FontInstanceFlags::FLIP_X) { -1.0 } else { 1.0 },
+                0.0,
+            )
+        };
+
+        for (_ch, metric) in text.chars().zip(metrics) {
+            positions.push(cursor);
+
+            match metric {
+                Some(metric) => {
+                    let glyph_rect = LayoutRect::new(
+                        LayoutPoint::new(cursor.x + metric.left as f32, cursor.y - metric.top as f32),
+                        LayoutSize::new(metric.width as f32, metric.height as f32)
+                    );
+                    bounding_rect = bounding_rect.union(&glyph_rect);
+                    cursor += horizontal_direction * metric.advance;
+                }
+                None => {
+                    let space_advance = self.font_size;
+                    cursor += horizontal_direction * space_advance;
+                }
+            }
+        }
+
+        let bounding_rect = bounding_rect.inflate(2.0, 2.0);
         let glyphs: Vec<GlyphInstance> = indices.iter().zip(positions)
             .map(|(idx, pos)| GlyphInstance { index: *idx, point: pos })
             .collect();
-        let info = LayoutPrimitiveInfo::new(bounding_rect);
-        builder.push_text(
-            &info,
-            &space_and_clip,
-            glyphs.as_slice(),
-            font_instance_key,
-            ColorF::BLACK,
-            None,
-        );
-        line_origin += vertical_direction;
+        LayoutedText {
+            glyphs,
+            bounding_rect
+        }
     }
+
+    pub fn show_text(&self,
+                     builder: &mut DisplayListBuilder,
+                     space_and_clip: &SpaceAndClipInfo,
+                     text: &str,
+                     origin: LayoutPoint) {
+        let mut line_origin = origin;
+        let vertical_direction = LayoutVector2D::new(0.0, self.font_size + 4.0);
+        for line_text in text.split_terminator("\n") {
+            let LayoutedText { glyphs, bounding_rect } = self.layout_simple_ascii(line_text,
+                                                                                  line_origin,
+                                                                                  FontInstanceFlags::default());
+
+            let info = LayoutPrimitiveInfo::new(bounding_rect);
+            builder.push_text(
+                &info,
+                &space_and_clip,
+                glyphs.as_slice(),
+                self.font_instance_key,
+                ColorF::BLACK,
+                None,
+            );
+            line_origin += vertical_direction;
+        }
 //    for g in glyphs {
 //        builder.push_rect(&LayoutPrimitiveInfo::new(LayoutRect::new(g.point, euclid::TypedSize2D::new(3.0, 3.0))), space_and_clip, ColorF::BLACK);
 //    }
 
+    }
 }
