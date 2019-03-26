@@ -12,6 +12,7 @@ use glutin::EventsLoop;
 use glutin::GlContext;
 use glutin::GlWindow;
 use webrender::api::*;
+use webrender::api::units::*;
 use webrender::DebugFlags;
 use webrender::Renderer;
 
@@ -52,12 +53,12 @@ fn create_webrender(gl_window: &GlWindow, events_loop: &EventsLoop) -> (Renderer
     return webrender::Renderer::new(gl, notifier, opts, None).unwrap();
 }
 
-fn framebuffer_size(gl_window: &GlWindow) -> webrender::api::DeviceIntSize {
+fn framebuffer_size(gl_window: &GlWindow) -> FramebufferIntSize {
     let size = gl_window
         .get_inner_size()
         .unwrap()
         .to_physical(gl_window.get_hidpi_factor());
-    webrender::api::DeviceIntSize::new(size.width as i32, size.height as i32)
+    FramebufferIntSize::new(size.width as i32, size.height as i32)
 }
 
 fn render_text_from_file(api: &RenderApi,
@@ -90,6 +91,7 @@ fn render_text_from_file(api: &RenderApi,
         vec![],
         None,
         webrender::api::ScrollSensitivity::ScriptAndInputEvents,
+        LayoutVector2D::new(0.0, 0.0),
     );
 
     let mut info = LayoutPrimitiveInfo::new(scroll_content_box);
@@ -128,7 +130,9 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
     let api = sender.create_api();
 
     let framebuffer_size = framebuffer_size(&gl_window);
+
     let layout_size: LayoutSize = framebuffer_size.to_f32() / euclid::TypedScale::new(gl_window.get_hidpi_factor() as f32);
+
     let document_id = api.add_document(framebuffer_size, 0);
     let pipeline_id = webrender::api::PipelineId(0, 0);
 
@@ -137,7 +141,7 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
 //    render_text_from_file(&api, &fonts_manager, pipeline_id, document_id, layout_size, &mut epoch, "resources/EditorImpl.java".to_string());
     let mut controller = dom::NoriaClient::spawn(render_server_addr, sender.clone(), pipeline_id, document_id, layout_size);
 
-    let mut cursor_position = webrender::api::WorldPoint::zero();
+    let mut cursor_position = WorldPoint::zero();
     let mut perf_log = vec![];
     let mut base_time = SystemTime::now();
 
@@ -184,7 +188,7 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                     position: glutin::dpi::LogicalPosition { x, y },
                     ..
                 } => {
-                    cursor_position = webrender::api::WorldPoint::new(x as f32, y as f32);
+                    cursor_position = WorldPoint::new(x as f32, y as f32);
                 }
                 glutin::WindowEvent::MouseInput {
                     state, button, ..

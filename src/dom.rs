@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH, Instant};
 use byteorder::{ReadBytesExt, BigEndian};
 use serde_json::Value;
 use webrender::api::*;
+use webrender::api::units::*;
 
 use crate::text;
 
@@ -250,7 +251,8 @@ impl NodeType {
                                                                                 *position,
                                                                                 vec![],
                                                                                 None,
-                                                                                webrender::api::ScrollSensitivity::ScriptAndInputEvents);
+                                                                                webrender::api::ScrollSensitivity::ScriptAndInputEvents,
+                                                                                LayoutVector2D::new(0.0, 0.0));
                 context.space_and_clip_stack.push(scroll_space_and_clip);
                 let mut info = LayoutPrimitiveInfo::new(*content);
                 if on_wheel.is_some() {

@@ -4,6 +4,7 @@ use std::io::Read;
 use app_units::Au;
 
 use webrender::api::*;
+use webrender::api::units::*;
 
 pub fn add_font<P: AsRef<Path>>(api: &RenderApi, txn: &mut Transaction, path: P) -> FontKey {
 
