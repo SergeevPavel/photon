@@ -139,7 +139,7 @@ impl NodeType {
         }
     }
 
-    fn set_attr(&mut self, context: &ApplyUpdatesContext, attribute: &str, value: &Value) {
+    fn set_attr(&mut self, context: &mut ApplyUpdatesContext, node_id: NodeId, attribute: &str, value: &Value) -> bool {
         match self {
             NodeType::Root => {
 
@@ -170,7 +170,12 @@ impl NodeType {
                     "content" => {
                         *content = parse_rect(value);
                     }
-
+                    "scroll-position" => {
+                        let x = value["x"].as_f64().unwrap() as f32;
+                        let y = value["y"].as_f64().unwrap() as f32;
+                        context.txn.scroll_node_with_id(LayoutPoint::new(x, y), ExternalScrollId(node_id, context.pipeline_id), ScrollClamping::ToContentBounds);
+                        return false;
+                    }
                     "on-wheel" => {
                         *on_wheel = parse_callback(value);
                     }
@@ -196,6 +201,7 @@ impl NodeType {
                 }
             }
         }
+        return true;
     }
 
     fn visit_down(&self, node_id: NodeId, context: &mut VisitorContext) {
@@ -364,6 +370,8 @@ struct VisitorContext<'a> {
 }
 
 struct ApplyUpdatesContext<'a> {
+    pipeline_id: PipelineId,
+    txn: &'a mut Transaction,
     fonts_manager: &'a FontsManager
 }
 
@@ -384,9 +392,10 @@ struct Dom {
     root_node: Option<NodeId>,
 }
 
-fn apply_updates(dom: &mut Dom, context: &ApplyUpdatesContext, message: Vec<u8>) {
+fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: Vec<u8>) -> bool {
     if let Ok(Value::Array(message)) = serde_json::from_slice(&message) {
         let _log_ids = message.first();
+        let mut need_rebuild = false;
         for update in message.iter().skip(1) {
 //            println!("{:?}", update);
             let update_type = update["update-type"].as_str().unwrap();
@@ -403,10 +412,12 @@ fn apply_updates(dom: &mut Dom, context: &ApplyUpdatesContext, message: Vec<u8>)
                         children: Vec::new(),
                     };
                     dom.nodes.insert(node_id, node);
+                    need_rebuild = true;
                 }
                 "destroy" => {
                     let node_id = update["node"].as_u64().unwrap();
                     assert!(dom.nodes.remove(&node_id).is_some());
+                    need_rebuild = true;
                 }
                 "add" => {
                     let node_id = update["node"].as_u64().unwrap();
@@ -418,6 +429,7 @@ fn apply_updates(dom: &mut Dom, context: &ApplyUpdatesContext, message: Vec<u8>)
                         let node = dom.nodes.get_mut(&node_id).unwrap();
                         node.children.insert(index as usize, value);
                     }
+                    need_rebuild = true;
                 }
                 "remove" => {
                     let node_id = update["node"].as_u64().unwrap();
@@ -429,17 +441,20 @@ fn apply_updates(dom: &mut Dom, context: &ApplyUpdatesContext, message: Vec<u8>)
                             node.children.remove(index as usize);
                         }
                     }
+                    need_rebuild = true;
                 }
                 "set-attr" => {
                     let node_id = update["node"].as_u64().unwrap();
                     let attribute = update["attr"].as_str().unwrap();
                     let node = dom.nodes.get_mut(&node_id).unwrap();
-                    node.node_type.set_attr(context, attribute, &update["value"]);
+                    need_rebuild |= node.node_type.set_attr(context, node_id, attribute, &update["value"]);
                 }
                 _ => ()
             }
         }
+        return need_rebuild
     }
+    return false
 }
 
 pub struct NoriaClient {
@@ -506,11 +521,25 @@ impl NoriaClient {
                 let msg = read_msg(&mut read_stream);
                 if let Some(msg) = msg {
                     let mut dom = updater.dom_mutex.lock().unwrap();
-                    let context = ApplyUpdatesContext {
-                        fonts_manager: &updater.fonts_manager
+                    let mut txn = Transaction::new();
+                    let mut context = ApplyUpdatesContext {
+                        pipeline_id: pipeline_id,
+                        fonts_manager: &updater.fonts_manager,
+                        txn: &mut txn
                     };
-                    apply_updates(&mut dom, &context, msg);
-                    updater.update(&mut dom, epoch);
+                    let rebuild_display_list = apply_updates(&mut dom, &mut context, msg);
+                    if rebuild_display_list {
+                        let mut builder = updater.build_display_list(&mut dom);
+                        txn.set_display_list(
+                            epoch,
+                            None,
+                            updater.content_size,
+                            builder.finalize(),
+                            true,
+                        );
+                    }
+                    txn.generate_frame();
+                    updater.api.send_transaction(updater.document_id, txn);
                     epoch.0 += 1;
                 } else {
                     break;
@@ -524,30 +553,17 @@ impl NoriaClient {
         }
     }
 
-    fn update(&self, dom: &Dom, epoch: Epoch) {
+    fn build_display_list(&self, dom: &Dom) -> DisplayListBuilder {
+        let mut visitor_context = VisitorContext {
+            nodes: &dom.nodes,
+            builder: DisplayListBuilder::new(self.pipeline_id, self.content_size),
+            space_and_clip_stack: Vec::new(),
+            api: &self.api,
+            fonts_manager: &self.fonts_manager,
+        };
         if let Some(root_node_id) = dom.root_node {
-            let mut txn = Transaction::new();
-            let mut builder = DisplayListBuilder::new(self.pipeline_id, self.content_size);
-            let mut visitor_context = VisitorContext {
-                nodes: &dom.nodes,
-                builder: builder,
-                space_and_clip_stack: Vec::new(),
-                api: &self.api,
-                fonts_manager: &self.fonts_manager,
-            };
-
             dom.nodes.get(&root_node_id).unwrap().visit(&mut visitor_context);
-
-            txn.set_display_list(
-                epoch,
-                None,
-                self.content_size,
-                visitor_context.builder.finalize(),
-                true,
-            );
-            txn.set_root_pipeline(self.pipeline_id);
-            txn.generate_frame();
-            self.api.send_transaction(self.document_id, txn);
         }
+        visitor_context.builder
     }
 }

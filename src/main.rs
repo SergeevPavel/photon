@@ -135,10 +135,14 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
 
     let document_id = api.add_document(framebuffer_size, 0);
     let pipeline_id = webrender::api::PipelineId(0, 0);
-
+//
 //    let fonts_manager = text::FontsManager::new(sender.create_api(), document_id);
 //    let mut epoch = Epoch(0);
 //    render_text_from_file(&api, &fonts_manager, pipeline_id, document_id, layout_size, &mut epoch, "resources/EditorImpl.java".to_string());
+
+    let mut txn = Transaction::new();
+    txn.set_root_pipeline(pipeline_id);
+    api.send_transaction(document_id, txn);
     let mut controller = dom::NoriaClient::spawn(render_server_addr, sender.clone(), pipeline_id, document_id, layout_size);
 
     let mut cursor_position = WorldPoint::zero();
@@ -201,12 +205,12 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                 glutin::WindowEvent::MouseWheel { delta, ..
                 } => {
                     perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "MouseWheel"));
+                    let hit_result = api.hit_test(document_id, Some(pipeline_id), cursor_position, HitTestFlags::empty());
                     const LINE_HEIGHT: f32 = 38.0; // TODO treat LineDelta in other place?
                     let delta_vector = match delta {
-                        glutin::MouseScrollDelta::LineDelta(dx, dy) => LayoutVector2D::new(dx, dy * LINE_HEIGHT),
-                        glutin::MouseScrollDelta::PixelDelta(pos) => LayoutVector2D::new(pos.x as f32, pos.y as f32),
+                        glutin::MouseScrollDelta::LineDelta(dx, dy) => LayoutVector2D::new(-dx, -dy * LINE_HEIGHT),
+                        glutin::MouseScrollDelta::PixelDelta(pos) => LayoutVector2D::new(-pos.x as f32, -pos.y as f32),
                     };
-                    let hit_result = api.hit_test(document_id, Some(pipeline_id), cursor_position, HitTestFlags::empty());
                     controller.mouse_wheel(hit_result, delta_vector);
 
 //                    let mut txn = Transaction::new();
@@ -224,6 +228,11 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
         }
 
         if need_repaint {
+//            {
+//                let debug_render = renderer.debug_renderer().unwrap();
+//                debug_render.add_text(100.0, 100.0, "hello", ColorU::new(0, 0, 0, 255), None);
+//
+//            }
             perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "Begin render"));
             let start = Instant::now();
             renderer.update();
