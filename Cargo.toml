@@ -18,3 +18,4 @@ fxhash = "0.2.1"
 [dependencies.webrender]
 git = "https://github.com/servo/webrender"
 rev = "4f29a15d64db6dcb19df1449b24dabd660bfdc5f"
+# features = ["pathfinder"]

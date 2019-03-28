@@ -5,6 +5,7 @@ use app_units::Au;
 
 use webrender::api::*;
 use webrender::api::units::*;
+use fxhash::FxHashMap;
 
 pub fn add_font<P: AsRef<Path>>(api: &RenderApi, txn: &mut Transaction, path: P) -> FontKey {
 
@@ -39,6 +40,8 @@ pub struct FontsManager {
     pub font_key: FontKey,
     pub font_instance_key: FontInstanceKey,
     pub font_size: f32,
+    pub index_cache: FxHashMap<char, Option<u32>>,
+    pub metrics_cache: FxHashMap<u32, Option<GlyphDimensions>>,
 }
 
 impl FontsManager {
@@ -52,23 +55,70 @@ impl FontsManager {
             api,
             font_key,
             font_instance_key,
-            font_size
+            font_size,
+            index_cache: FxHashMap::default(),
+            metrics_cache: FxHashMap::default(),
         }
     }
 
+    fn get_glyph_indices(&mut self, text: &str) -> Vec<Option<u32>> {
+        let mut indexes = vec![Default::default(); text.len()];
+        let mut missed_chars = String::new();
+        let mut miss_positions = Vec::new();
+        for (pos, ch) in text.chars().enumerate() {
+            if let Some(idx) = self.index_cache.get(&ch) {
+                indexes[pos] = *idx;
+            } else {
+                missed_chars.push(ch);
+                miss_positions.push(pos);
+            }
+        }
+
+        if missed_chars.len() > 0 {
+            let missing_indexes = self.api.get_glyph_indices(self.font_key, missed_chars.as_str());
+            for (pos, index) in miss_positions.iter().zip(missing_indexes.iter()) {
+                indexes[*pos] = *index;
+            }
+            for (index, ch) in missing_indexes.iter().zip(missed_chars.chars().into_iter()) {
+                self.index_cache.insert(ch, *index);
+            }
+        }
+        indexes
+    }
+
+    fn get_glyph_dimensions(&mut self, indexes: &Vec<GlyphIndex>) -> Vec<Option<GlyphDimensions>> {
+        let mut glyph_dimensions = vec![Default::default(); indexes.len()];
+        let mut missed_indexes = Vec::new();
+        let mut miss_positions = Vec::new();
+        for (pos, index) in indexes.iter().enumerate() {
+            if let Some(dimensions) = self.metrics_cache.get(&index) {
+                glyph_dimensions[pos] = *dimensions;
+            } else {
+                missed_indexes.push(*index);
+                miss_positions.push(pos);
+            }
+        }
+        if missed_indexes.len() > 0 {
+            let missing_dimensions = self.api.get_glyph_dimensions(self.font_instance_key, missed_indexes.clone());
+            for (pos, dimensions) in miss_positions.iter().zip(missing_dimensions.iter()) {
+                glyph_dimensions[*pos] = *dimensions;
+            }
+            for (dimensions, index) in missing_dimensions.iter().zip(missed_indexes.iter()) {
+                self.metrics_cache.insert(*index, *dimensions);
+            }
+        }
+        glyph_dimensions
+    }
+
     pub fn layout_simple_ascii(
-        &self,
+        &mut self,
         text: &str,
         origin: LayoutPoint,
         flags: FontInstanceFlags,
     ) -> LayoutedText {
-        let indices: Vec<u32> = self.api
-            .get_glyph_indices(self.font_key, text)
-            .iter()
-            .filter_map(|idx| *idx)
-            .collect();
+        let indices: Vec<u32> = self.get_glyph_indices(text).iter().filter_map(|idx| *idx).collect();
 
-        let metrics = self.api.get_glyph_dimensions(self.font_instance_key, indices.clone());
+        let metrics = self.get_glyph_dimensions(&indices);
 
         let mut bounding_rect = LayoutRect::zero();
         let mut positions = Vec::new();
@@ -115,7 +165,7 @@ impl FontsManager {
         }
     }
 
-    pub fn show_text(&self,
+    pub fn show_text(&mut self,
                      builder: &mut DisplayListBuilder,
                      space_and_clip: &SpaceAndClipInfo,
                      text: &str,

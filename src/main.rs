@@ -63,7 +63,7 @@ fn framebuffer_size(gl_window: &GlWindow) -> FramebufferIntSize {
 }
 
 fn render_text_from_file(api: &RenderApi,
-                         fonts_manager: &FontsManager,
+                         fonts_manager: &mut FontsManager,
                          pipeline_id: PipelineId,
                          document_id: DocumentId,
                          layout_size: LayoutSize,
@@ -205,8 +205,10 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                 }
                 glutin::WindowEvent::MouseWheel { delta, ..
                 } => {
-                    perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "MouseWheel"));
                     let hit_result = api.hit_test(document_id, Some(pipeline_id), cursor_position, HitTestFlags::empty());
+                    if hit_result.items.len() > 0 {
+                        perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "MouseWheel"));
+                    }
                     const LINE_HEIGHT: f32 = 38.0; // TODO treat LineDelta in other place?
                     let delta_vector = match delta {
                         glutin::MouseScrollDelta::LineDelta(dx, dy) => LayoutVector2D::new(-dx, -dy * LINE_HEIGHT),

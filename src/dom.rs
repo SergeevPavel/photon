@@ -64,7 +64,7 @@ const FANCY_GREEN: ColorF = ColorF {
 enum NodeType {
     Root,
     Div { color: ColorF, rect: LayoutRect, on_click: Callback, on_wheel: Callback },
-    Text { text: String, origin: LayoutPoint, layouted_text: Option<text::LayoutedText> },
+    Text { text: String, origin: LayoutPoint, layouted_text: Option<text::LayoutedText>, color: ColorF },
     Scroll { position: LayoutRect,
              content: LayoutRect,
              on_wheel: Callback },
@@ -113,8 +113,8 @@ impl NodeType {
                 NodeType::Text {
                     text: default_text,
                     origin: default_origin,
-                    layouted_text: None
-
+                    layouted_text: None,
+                    color: ColorF::BLACK,
                 }
             }
             "div" => {
@@ -183,19 +183,22 @@ impl NodeType {
                     _ => ()
                 }
             }
-            NodeType::Text { ref mut text, origin, layouted_text } => {
+            NodeType::Text { ref mut text, origin, layouted_text, color } => {
                 match attribute {
                     "text" => {
                         *text = value.as_str().unwrap().to_string();
                         *layouted_text = Some(context.fonts_manager.layout_simple_ascii(text,
-                                                                                        origin.clone(),
+                                                                                        LayoutPoint::new(0.0, 0.0),
                                                                                         FontInstanceFlags::default()));
                     }
                     "origin" => {
                         *origin = parse_point(value);
-                        *layouted_text = Some(context.fonts_manager.layout_simple_ascii(text,
-                                                                                        origin.clone(),
-                                                                                        FontInstanceFlags::default()));
+                    }
+                    "color" => {
+                        *color = ColorU::new(value["r"].as_u64().unwrap() as u8,
+                                             value["g"].as_u64().unwrap() as u8,
+                                             value["b"].as_u64().unwrap() as u8,
+                                             value["a"].as_u64().unwrap() as u8).into();
                     }
                     _ => ()
                 }
@@ -268,15 +271,16 @@ impl NodeType {
                                           &scroll_space_and_clip,
                                           ColorF::TRANSPARENT);
             }
-            NodeType::Text { text, origin, layouted_text } => {
+            NodeType::Text { text, origin, layouted_text, color } => {
                 if let Some(parent_space_and_clip) = context.space_and_clip_stack.last() {
                     if let Some(layouted_text) = layouted_text {
-                        let info = LayoutPrimitiveInfo::new(layouted_text.bounding_rect);
-                        context.builder.push_text(&info,
+                        let info = LayoutPrimitiveInfo::new(LayoutRect::new(*origin, layouted_text.bounding_rect.size));
+                        context.builder.push_simple_stacking_context(&info, parent_space_and_clip.spatial_id);
+                        context.builder.push_text(&LayoutPrimitiveInfo::new(layouted_text.bounding_rect),
                                                   &parent_space_and_clip,
                                                   layouted_text.glyphs.as_slice(),
                                                   context.fonts_manager.font_instance_key,
-                                                  ColorF::BLACK,
+                                                  *color,
                                                   None);
                     }
                 } else {
@@ -301,7 +305,9 @@ impl NodeType {
                 assert!(context.space_and_clip_stack.pop().is_some());
             }
 
-            _ => ()
+            NodeType::Text { .. } => {
+                context.builder.pop_stacking_context();
+            }
         }
     }
 
@@ -372,7 +378,7 @@ struct VisitorContext<'a> {
 struct ApplyUpdatesContext<'a> {
     pipeline_id: PipelineId,
     txn: &'a mut Transaction,
-    fonts_manager: &'a FontsManager
+    fonts_manager: &'a mut FontsManager
 }
 
 impl Node {
@@ -397,7 +403,6 @@ fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: Vec<
         let _log_ids = message.first();
         let mut need_rebuild = false;
         for update in message.iter().skip(1) {
-//            println!("{:?}", update);
             let update_type = update["update-type"].as_str().unwrap();
             match update_type {
                 "make-node" => {
@@ -474,9 +479,9 @@ pub struct Controller {
 
 impl Controller {
     pub fn mouse_click(&mut self, hit_result: HitTestResult) {
+        let dom = self.dom_mutex.lock().unwrap();
         for item in hit_result.items {
             let (node_id, _) = item.tag;
-            let dom = self.dom_mutex.lock().unwrap();
             let node_type = &dom.nodes.get(&node_id).unwrap().node_type;
             self.log_id += 1;
             node_type.on_click(&mut self.stream, self.log_id, node_id, &item.point_relative_to_item);
@@ -485,9 +490,9 @@ impl Controller {
     }
 
     pub fn mouse_wheel(&mut self, hit_result: HitTestResult, delta: LayoutVector2D) {
+        let dom = self.dom_mutex.lock().unwrap();
         for item in hit_result.items {
             let (node_id, _) = item.tag;
-            let dom = self.dom_mutex.lock().unwrap();
             let node_type = &dom.nodes.get(&node_id).unwrap().node_type;
             self.log_id += 1;
             node_type.on_wheel(&mut self.stream, self.log_id, node_id, &delta);
@@ -524,11 +529,16 @@ impl NoriaClient {
                     let mut txn = Transaction::new();
                     let mut context = ApplyUpdatesContext {
                         pipeline_id: pipeline_id,
-                        fonts_manager: &updater.fonts_manager,
+                        fonts_manager: &mut updater.fonts_manager,
                         txn: &mut txn
                     };
+//                    println!("BEGIN");
+                    let start = Instant::now();
                     let rebuild_display_list = apply_updates(&mut dom, &mut context, msg);
+                    let end = Instant::now();
+//                    println!("MOVE: {:?}", (end - start).as_millis());
                     if rebuild_display_list {
+//                        println!("REBUILD: {:?} {:?} {:?}", (end - start).as_millis(), context.fonts_manager.index_cache.len(), context.fonts_manager.metrics_cache.len());
                         let mut builder = updater.build_display_list(&mut dom);
                         txn.set_display_list(
                             epoch,
