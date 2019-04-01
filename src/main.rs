@@ -3,6 +3,7 @@ extern crate byteorder;
 
 mod text;
 mod dom;
+mod transport;
 
 use std::fs::File;
 use std::io::{Read, BufReader};
@@ -17,7 +18,7 @@ use webrender::DebugFlags;
 use webrender::Renderer;
 
 use text::*;
-use std::time::{SystemTime, Instant};
+use std::time::{SystemTime, Instant, UNIX_EPOCH};
 use std::env;
 use std::net::{ToSocketAddrs, Ipv4Addr};
 use serde::Deserialize;
@@ -155,7 +156,8 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
 
         match event {
             Event::Awakened => {
-                perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "Awakened"));
+//                println!("awake");
+//                perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "Awakened"));
                 need_repaint = true;
             },
             Event::WindowEvent { event: window_event, .. } => match window_event {
@@ -236,13 +238,14 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
 //                debug_render.add_text(100.0, 100.0, "hello", ColorU::new(0, 0, 0, 255), None);
 //
 //            }
-            perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "Begin render"));
+            println!("{} ready", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()  % 1000);
+//            perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "Begin render"));
             let start = Instant::now();
             renderer.update();
             perf_log.push((start.elapsed().as_millis(), "Update took"));
             let start = Instant::now();
-            renderer.flush_pipeline_info();
             renderer.render(framebuffer_size).unwrap();
+            renderer.flush_pipeline_info();
             perf_log.push((start.elapsed().as_millis(), "Render took"));
             let start = Instant::now();
             gl_window.swap_buffers().unwrap();
@@ -300,17 +303,20 @@ impl webrender::api::RenderNotifier for Notifier {
     }
 
     fn wake_up(&self) {
+        println!("wakeup!");
         self.events_proxy.wakeup().unwrap();
     }
 
     fn new_frame_ready(
         &self,
-        _: webrender::api::DocumentId,
+        _document_id: webrender::api::DocumentId,
         _scrolled: bool,
-        _composite_needed: bool,
+        composite_needed: bool,
         _render_time: Option<u64>,
     ) {
-
-        self.wake_up();
+//        println!("{:?} {:?} {:?} {:?}", _document_id, _scrolled, composite_needed, _render_time.map(|t| t as f32 / 1000_000.0));
+        if composite_needed {
+            self.events_proxy.wakeup().unwrap();
+        }
     }
 }

@@ -2,7 +2,6 @@
 extern crate fxhash;
 use fxhash::FxHashMap;
 
-
 use std::thread;
 
 use std::io::prelude::*;
@@ -15,10 +14,11 @@ use webrender::api::*;
 use webrender::api::units::*;
 
 use crate::text;
+use crate::transport::*;
 
 use euclid::TypedSize2D;
 use std::sync::{Mutex, Arc};
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use crate::text::FontsManager;
 
 fn read_msg(stream: &mut TcpStream) -> Option<Vec<u8>> {
@@ -174,6 +174,8 @@ impl NodeType {
                         let x = value["x"].as_f64().unwrap() as f32;
                         let y = value["y"].as_f64().unwrap() as f32;
                         context.txn.scroll_node_with_id(LayoutPoint::new(x, y), ExternalScrollId(node_id, context.pipeline_id), ScrollClamping::ToContentBounds);
+                        context.txn.skip_scene_builder();
+                        println!("{} scroll", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() % 1000);
                         return false;
                     }
                     "on-wheel" => {
@@ -398,16 +400,20 @@ struct Dom {
     root_node: Option<NodeId>,
 }
 
-fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: Vec<u8>) -> bool {
-    if let Ok(Value::Array(message)) = serde_json::from_slice(&message) {
-        let _log_ids = message.first();
-        let mut need_rebuild = false;
-        for update in message.iter().skip(1) {
-            let update_type = update["update-type"].as_str().unwrap();
-            match update_type {
-                "make-node" => {
-                    let node_id = update["node"].as_u64().unwrap();
-                    let node_type = NodeType::create(update["type"].as_str().unwrap());
+fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: &Vec<u8>) -> bool {
+    let updates = if let Some(updates) = serde_json::from_slice::<NoriaUpdates>(&message).ok() {
+        updates
+    } else {
+        println!("{}", String::from_utf8(message.clone()).unwrap());
+        panic!()
+    };
+
+    let mut need_rebuild = false;
+    for update in updates {
+        if let UpdateOrLogId::Update(update) = update {
+            match update {
+                Update::MakeNode(MakeNode { node_id, node_type }) => {
+                    let node_type = NodeType::create(node_type.as_str());
                     if let NodeType::Root = node_type {
                         dom.root_node = Some(node_id);
                     }
@@ -419,28 +425,22 @@ fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: Vec<
                     dom.nodes.insert(node_id, node);
                     need_rebuild = true;
                 }
-                "destroy" => {
-                    let node_id = update["node"].as_u64().unwrap();
+                Update::Destroy(Destroy { node_id }) => {
                     assert!(dom.nodes.remove(&node_id).is_some());
                     need_rebuild = true;
                 }
-                "add" => {
-                    let node_id = update["node"].as_u64().unwrap();
-                    let attribute = update["attr"].as_str().unwrap();
-                    let index = update["index"].as_u64().unwrap();
+                Update::Add(Add { node_id, attribute, index, value }) => {
                     if attribute == "children" {
-                        let value = update["value"].as_u64().unwrap();
+                        let value = value.as_u64().unwrap();
                         assert!(dom.nodes.contains_key(&value));
                         let node = dom.nodes.get_mut(&node_id).unwrap();
                         node.children.insert(index as usize, value);
                     }
                     need_rebuild = true;
                 }
-                "remove" => {
-                    let node_id = update["node"].as_u64().unwrap();
-                    let attribute = update["attr"].as_str().unwrap();
+                Update::Remove(Remove { node_id, attribute, value }) => {
                     if attribute == "children" {
-                        let value = update["value"].as_u64().unwrap();
+                        let value = value.as_u64().unwrap();
                         let node = dom.nodes.get_mut(&node_id).expect(format!("No node with {}", node_id).as_str());
                         if let Some(index) = node.children.iter().position(|x| *x == value) {
                             node.children.remove(index as usize);
@@ -448,18 +448,14 @@ fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: Vec<
                     }
                     need_rebuild = true;
                 }
-                "set-attr" => {
-                    let node_id = update["node"].as_u64().unwrap();
-                    let attribute = update["attr"].as_str().unwrap();
+                Update::SetAttr(SetAttr { node_id, attribute, value }) => {
                     let node = dom.nodes.get_mut(&node_id).unwrap();
-                    need_rebuild |= node.node_type.set_attr(context, node_id, attribute, &update["value"]);
+                    need_rebuild |= node.node_type.set_attr(context, node_id, attribute.as_str(), &value);
                 }
-                _ => ()
             }
         }
-        return need_rebuild
     }
-    return false
+    return need_rebuild
 }
 
 pub struct NoriaClient {
@@ -534,23 +530,23 @@ impl NoriaClient {
                     };
 //                    println!("BEGIN");
                     let start = Instant::now();
-                    let rebuild_display_list = apply_updates(&mut dom, &mut context, msg);
+                    let rebuild_display_list = apply_updates(&mut dom, &mut context, &msg);
                     let end = Instant::now();
 //                    println!("MOVE: {:?}", (end - start).as_millis());
                     if rebuild_display_list {
-//                        println!("REBUILD: {:?} {:?} {:?}", (end - start).as_millis(), context.fonts_manager.index_cache.len(), context.fonts_manager.metrics_cache.len());
+//                        println!("REBUILD: {:?}", (end - start).as_millis());
                         let mut builder = updater.build_display_list(&mut dom);
                         txn.set_display_list(
                             epoch,
-                            None,
+                            Some(ColorF::BLACK),
                             updater.content_size,
                             builder.finalize(),
                             true,
                         );
+                        epoch.0 += 1;
                     }
                     txn.generate_frame();
                     updater.api.send_transaction(updater.document_id, txn);
-                    epoch.0 += 1;
                 } else {
                     break;
                 }
