@@ -13,13 +13,15 @@ use serde_json::Value;
 use webrender::api::*;
 use webrender::api::units::*;
 
-use crate::text;
+use crate::{text, perf};
 use crate::transport::*;
 
 use euclid::TypedSize2D;
 use std::sync::{Mutex, Arc};
 use serde::{Serialize, Deserialize};
 use crate::text::FontsManager;
+use serde_json::error::ErrorCode::ControlCharacterWhileParsingString;
+use glutin::MouseScrollDelta;
 
 fn read_msg(stream: &mut TcpStream) -> Option<Vec<u8>> {
     let size = stream.read_u32::<BigEndian>().unwrap();
@@ -174,8 +176,7 @@ impl NodeType {
                         let x = value["x"].as_f64().unwrap() as f32;
                         let y = value["y"].as_f64().unwrap() as f32;
                         context.txn.scroll_node_with_id(LayoutPoint::new(x, y), ExternalScrollId(node_id, context.pipeline_id), ScrollClamping::ToContentBounds);
-                        context.txn.skip_scene_builder();
-                        println!("{} scroll", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() % 1000);
+//                        context.txn.skip_scene_builder();
                         return false;
                     }
                     "on-wheel" => {
@@ -400,62 +401,67 @@ struct Dom {
     root_node: Option<NodeId>,
 }
 
-fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: &Vec<u8>) -> bool {
+fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: &Vec<u8>) -> (bool, Vec<u64>) {
     let updates = if let Some(updates) = serde_json::from_slice::<NoriaUpdates>(&message).ok() {
         updates
     } else {
         println!("{}", String::from_utf8(message.clone()).unwrap());
         panic!()
     };
-
     let mut need_rebuild = false;
+    let mut log_ids = vec![0; 0];
     for update in updates {
-        if let UpdateOrLogId::Update(update) = update {
-            match update {
-                Update::MakeNode(MakeNode { node_id, node_type }) => {
-                    let node_type = NodeType::create(node_type.as_str());
-                    if let NodeType::Root = node_type {
-                        dom.root_node = Some(node_id);
-                    }
-                    let mut node = Node {
-                        id: node_id,
-                        node_type: node_type,
-                        children: Vec::new(),
-                    };
-                    dom.nodes.insert(node_id, node);
-                    need_rebuild = true;
-                }
-                Update::Destroy(Destroy { node_id }) => {
-                    assert!(dom.nodes.remove(&node_id).is_some());
-                    need_rebuild = true;
-                }
-                Update::Add(Add { node_id, attribute, index, value }) => {
-                    if attribute == "children" {
-                        let value = value.as_u64().unwrap();
-                        assert!(dom.nodes.contains_key(&value));
-                        let node = dom.nodes.get_mut(&node_id).unwrap();
-                        node.children.insert(index as usize, value);
-                    }
-                    need_rebuild = true;
-                }
-                Update::Remove(Remove { node_id, attribute, value }) => {
-                    if attribute == "children" {
-                        let value = value.as_u64().unwrap();
-                        let node = dom.nodes.get_mut(&node_id).expect(format!("No node with {}", node_id).as_str());
-                        if let Some(index) = node.children.iter().position(|x| *x == value) {
-                            node.children.remove(index as usize);
+        match update {
+            UpdateOrLogId::LogIds(ids) => {
+                log_ids = ids;
+            }
+            UpdateOrLogId::Update(update) => {
+                match update {
+                    Update::MakeNode(MakeNode { node_id, node_type }) => {
+                        let node_type = NodeType::create(node_type.as_str());
+                        if let NodeType::Root = node_type {
+                            dom.root_node = Some(node_id);
                         }
+                        let mut node = Node {
+                            id: node_id,
+                            node_type: node_type,
+                            children: Vec::new(),
+                        };
+                        dom.nodes.insert(node_id, node);
+                        need_rebuild = true;
                     }
-                    need_rebuild = true;
-                }
-                Update::SetAttr(SetAttr { node_id, attribute, value }) => {
-                    let node = dom.nodes.get_mut(&node_id).unwrap();
-                    need_rebuild |= node.node_type.set_attr(context, node_id, attribute.as_str(), &value);
+                    Update::Destroy(Destroy { node_id }) => {
+                        assert!(dom.nodes.remove(&node_id).is_some());
+                        need_rebuild = true;
+                    }
+                    Update::Add(Add { node_id, attribute, index, value }) => {
+                        if attribute == "children" {
+                            let value = value.as_u64().unwrap();
+                            assert!(dom.nodes.contains_key(&value));
+                            let node = dom.nodes.get_mut(&node_id).unwrap();
+                            node.children.insert(index as usize, value);
+                        }
+                        need_rebuild = true;
+                    }
+                    Update::Remove(Remove { node_id, attribute, value }) => {
+                        if attribute == "children" {
+                            let value = value.as_u64().unwrap();
+                            let node = dom.nodes.get_mut(&node_id).expect(format!("No node with {}", node_id).as_str());
+                            if let Some(index) = node.children.iter().position(|x| *x == value) {
+                                node.children.remove(index as usize);
+                            }
+                        }
+                        need_rebuild = true;
+                    }
+                    Update::SetAttr(SetAttr { node_id, attribute, value }) => {
+                        let node = dom.nodes.get_mut(&node_id).unwrap();
+                        need_rebuild |= node.node_type.set_attr(context, node_id, attribute.as_str(), &value);
+                    }
                 }
             }
         }
     }
-    return need_rebuild
+    return (need_rebuild, log_ids)
 }
 
 pub struct NoriaClient {
@@ -471,10 +477,27 @@ pub struct Controller {
     dom_mutex: Arc<Mutex<Dom>>,
     stream: TcpStream,
     log_id: u64,
+    document_id: DocumentId,
+    pipeline_id: PipelineId,
+    api: RenderApi,
+}
+
+impl Clone for Controller {
+    fn clone(&self) -> Self {
+        Controller {
+            dom_mutex: self.dom_mutex.clone(),
+            stream: self.stream.try_clone().expect("Can't clone stream"),
+            log_id: self.log_id, // TODO shared log_id counter?
+            document_id: self.document_id,
+            pipeline_id: self.pipeline_id,
+            api: self.api.clone_sender().create_api(),
+        }
+    }
 }
 
 impl Controller {
-    pub fn mouse_click(&mut self, hit_result: HitTestResult) {
+    pub fn mouse_click(&mut self, cursor_position: WorldPoint) {
+        let hit_result = self.api.hit_test(self.document_id, Some(self.pipeline_id), cursor_position, HitTestFlags::empty());
         let dom = self.dom_mutex.lock().unwrap();
         for item in hit_result.items {
             let (node_id, _) = item.tag;
@@ -485,13 +508,24 @@ impl Controller {
         }
     }
 
-    pub fn mouse_wheel(&mut self, hit_result: HitTestResult, delta: LayoutVector2D) {
+    pub fn mouse_wheel(&mut self, cursor_position: WorldPoint, delta: MouseScrollDelta) {
+        let hit_result = self.api.hit_test(self.document_id, Some(self.pipeline_id), cursor_position, HitTestFlags::empty());
+        if hit_result.items.len() > 0 {
+            perf::log(perf::LogMessage::GetMouseWheel);
+        }
+        const LINE_HEIGHT: f32 = 38.0;
+        let delta_vector = match delta {
+            glutin::MouseScrollDelta::LineDelta(dx, dy) => LayoutVector2D::new(-dx, -dy * LINE_HEIGHT),
+            glutin::MouseScrollDelta::PixelDelta(pos) => LayoutVector2D::new(-pos.x as f32, -pos.y as f32),
+        };
+
         let dom = self.dom_mutex.lock().unwrap();
         for item in hit_result.items {
             let (node_id, _) = item.tag;
             let node_type = &dom.nodes.get(&node_id).unwrap().node_type;
             self.log_id += 1;
-            node_type.on_wheel(&mut self.stream, self.log_id, node_id, &delta);
+            perf::log(perf::LogMessage::SendMouseWheel { log_id: self.log_id });
+            node_type.on_wheel(&mut self.stream, self.log_id, node_id, &delta_vector);
         }
     }
 }
@@ -520,6 +554,7 @@ impl NoriaClient {
             let mut epoch = Epoch(0);
             loop {
                 let msg = read_msg(&mut read_stream);
+                perf::log(perf::LogMessage::GetNoriaMessage);
                 if let Some(msg) = msg {
                     let mut dom = updater.dom_mutex.lock().unwrap();
                     let mut txn = Transaction::new();
@@ -528,13 +563,8 @@ impl NoriaClient {
                         fonts_manager: &mut updater.fonts_manager,
                         txn: &mut txn
                     };
-//                    println!("BEGIN");
-                    let start = Instant::now();
-                    let rebuild_display_list = apply_updates(&mut dom, &mut context, &msg);
-                    let end = Instant::now();
-//                    println!("MOVE: {:?}", (end - start).as_millis());
+                    let (rebuild_display_list, log_ids) = apply_updates(&mut dom, &mut context, &msg);
                     if rebuild_display_list {
-//                        println!("REBUILD: {:?}", (end - start).as_millis());
                         let mut builder = updater.build_display_list(&mut dom);
                         txn.set_display_list(
                             epoch,
@@ -546,6 +576,8 @@ impl NoriaClient {
                         epoch.0 += 1;
                     }
                     txn.generate_frame();
+                    perf::push_log_ids(log_ids.clone());
+                    perf::log(perf::LogMessage::SendTransaction { log_ids });
                     updater.api.send_transaction(updater.document_id, txn);
                 } else {
                     break;
@@ -555,7 +587,10 @@ impl NoriaClient {
         Controller {
             dom_mutex: dom_mutex,
             stream: stream,
-            log_id: 0
+            log_id: 0,
+            document_id: document_id,
+            pipeline_id: pipeline_id,
+            api: sender.create_api(),
         }
     }
 

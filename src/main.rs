@@ -1,14 +1,16 @@
 extern crate euclid;
 extern crate byteorder;
+#[macro_use] extern crate log;
 
 mod text;
 mod dom;
 mod transport;
+mod perf;
 
 use std::fs::File;
 use std::io::{Read, BufReader};
 
-use glutin::{Event, ElementState, MouseButton};
+use glutin::{Event, ElementState, MouseButton, MouseScrollDelta};
 use glutin::EventsLoop;
 use glutin::GlContext;
 use glutin::GlWindow;
@@ -18,7 +20,7 @@ use webrender::DebugFlags;
 use webrender::Renderer;
 
 use text::*;
-use std::time::{SystemTime, Instant, UNIX_EPOCH};
+use std::time::{SystemTime, Instant, UNIX_EPOCH, Duration};
 use std::env;
 use std::net::{ToSocketAddrs, Ipv4Addr};
 use serde::Deserialize;
@@ -144,20 +146,17 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
 
     let mut txn = Transaction::new();
     txn.set_root_pipeline(pipeline_id);
+    txn.generate_frame();
     api.send_transaction(document_id, txn);
     let mut controller = dom::NoriaClient::spawn(render_server_addr, sender.clone(), pipeline_id, document_id, layout_size);
 
     let mut cursor_position = WorldPoint::zero();
-    let mut perf_log = vec![];
-    let mut base_time = SystemTime::now();
 
     events_loop.run_forever(|event| {
         let mut need_repaint = false;
 
         match event {
             Event::Awakened => {
-//                println!("awake");
-//                perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "Awakened"));
                 need_repaint = true;
             },
             Event::WindowEvent { event: window_event, .. } => match window_event {
@@ -182,11 +181,21 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                             api.send_debug_cmd(DebugCommand::SetFlags(debug_flags));
                         }
                         glutin::VirtualKeyCode::D => {
-                            for e in &perf_log {
-                                println!("{:?}", e);
+                            perf::print();
+                        }
+                        glutin::VirtualKeyCode::Space => {
+                            {
+                                let cursor_position = cursor_position.clone();
+                                let mut controller = controller.clone();
+                                std::thread::spawn(move || {
+                                    for _ in 0..5000 {
+                                        let delta = MouseScrollDelta::PixelDelta(glutin::dpi::LogicalPosition::new(0.0, -1.0));
+                                        controller.mouse_wheel(cursor_position, delta);
+                                        std::thread::sleep(Duration::from_millis(16));
+                                    }
+                                });
+
                             }
-                            perf_log.clear();
-                            base_time = SystemTime::now()
                         }
                         _ => {}
                     }
@@ -200,23 +209,13 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                 glutin::WindowEvent::MouseInput {
                     state, button, ..
                 } => {
-                    let hit_result = api.hit_test(document_id, Some(pipeline_id), cursor_position, HitTestFlags::empty());
                     if state == ElementState::Pressed && button == MouseButton::Left {
-                        controller.mouse_click(hit_result);
+                        controller.mouse_click(cursor_position);
                     }
                 }
                 glutin::WindowEvent::MouseWheel { delta, ..
                 } => {
-                    let hit_result = api.hit_test(document_id, Some(pipeline_id), cursor_position, HitTestFlags::empty());
-                    if hit_result.items.len() > 0 {
-                        perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "MouseWheel"));
-                    }
-                    const LINE_HEIGHT: f32 = 38.0; // TODO treat LineDelta in other place?
-                    let delta_vector = match delta {
-                        glutin::MouseScrollDelta::LineDelta(dx, dy) => LayoutVector2D::new(-dx, -dy * LINE_HEIGHT),
-                        glutin::MouseScrollDelta::PixelDelta(pos) => LayoutVector2D::new(-pos.x as f32, -pos.y as f32),
-                    };
-                    controller.mouse_wheel(hit_result, delta_vector);
+                    controller.mouse_wheel(cursor_position, delta);
 
 //                    let mut txn = Transaction::new();
 //                    txn.scroll(
@@ -233,23 +232,12 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
         }
 
         if need_repaint {
-//            {
-//                let debug_render = renderer.debug_renderer().unwrap();
-//                debug_render.add_text(100.0, 100.0, "hello", ColorU::new(0, 0, 0, 255), None);
-//
-//            }
-            println!("{} ready", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()  % 1000);
-//            perf_log.push((SystemTime::now().duration_since(base_time).unwrap().as_millis(), "Begin render"));
-            let start = Instant::now();
+            perf::log(perf::LogMessage::NewFrameReady { log_ids: perf::pop_log_ids() });
             renderer.update();
-            perf_log.push((start.elapsed().as_millis(), "Update took"));
-            let start = Instant::now();
             renderer.render(framebuffer_size).unwrap();
             renderer.flush_pipeline_info();
-            perf_log.push((start.elapsed().as_millis(), "Render took"));
-            let start = Instant::now();
             gl_window.swap_buffers().unwrap();
-            perf_log.push((start.elapsed().as_millis(), "Swap buffers took"));
+            perf::log(perf::LogMessage::NewFrameDone);
         }
 
         return glutin::ControlFlow::Continue;
@@ -275,6 +263,7 @@ struct PortFileContent {
 
 fn main() -> std::io::Result<()> {
     env_logger::init();
+    perf::init();
     let args: Vec<String> = env::args().collect();
     if args.len() >= 2 {
         let port_file = &args[1];
@@ -303,7 +292,6 @@ impl webrender::api::RenderNotifier for Notifier {
     }
 
     fn wake_up(&self) {
-        println!("wakeup!");
         self.events_proxy.wakeup().unwrap();
     }
 
@@ -314,6 +302,7 @@ impl webrender::api::RenderNotifier for Notifier {
         composite_needed: bool,
         _render_time: Option<u64>,
     ) {
+        debug!("{:?} {:?} {:?} {:?}", _document_id, _scrolled, composite_needed, _render_time);
 //        println!("{:?} {:?} {:?} {:?}", _document_id, _scrolled, composite_needed, _render_time.map(|t| t as f32 / 1000_000.0));
         if composite_needed {
             self.events_proxy.wakeup().unwrap();
