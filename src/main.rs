@@ -20,10 +20,11 @@ use webrender::DebugFlags;
 use webrender::Renderer;
 
 use text::*;
-use std::time::{SystemTime, Instant, UNIX_EPOCH, Duration};
+use std::time::{SystemTime, Instant, Duration};
 use std::env;
 use std::net::{ToSocketAddrs, Ipv4Addr};
 use serde::Deserialize;
+
 
 fn create_window(events_loop: &EventsLoop) -> GlWindow {
     let window_builder = glutin::WindowBuilder::new()
@@ -139,7 +140,6 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
 
     let document_id = api.add_document(framebuffer_size, 0);
     let pipeline_id = webrender::api::PipelineId(0, 0);
-//
 //    let fonts_manager = text::FontsManager::new(sender.create_api(), document_id);
 //    let mut epoch = Epoch(0);
 //    render_text_from_file(&api, &fonts_manager, pipeline_id, document_id, layout_size, &mut epoch, "resources/EditorImpl.java".to_string());
@@ -188,7 +188,7 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                                 let cursor_position = cursor_position.clone();
                                 let mut controller = controller.clone();
                                 std::thread::spawn(move || {
-                                    for _ in 0..5000 {
+                                    for _ in 0..2000 {
                                         let delta = MouseScrollDelta::PixelDelta(glutin::dpi::LogicalPosition::new(0.0, -1.0));
                                         controller.mouse_wheel(cursor_position, delta);
                                         std::thread::sleep(Duration::from_millis(16));
@@ -232,12 +232,13 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
         }
 
         if need_repaint {
-            perf::log(perf::LogMessage::NewFrameReady { log_ids: perf::pop_log_ids() });
+            perf::on_new_frame_ready();
+            let start = Instant::now();
             renderer.update();
             renderer.render(framebuffer_size).unwrap();
             renderer.flush_pipeline_info();
             gl_window.swap_buffers().unwrap();
-            perf::log(perf::LogMessage::NewFrameDone);
+            perf::log(perf::LogMessage::SwapTime { t: start.elapsed() });
         }
 
         return glutin::ControlFlow::Continue;

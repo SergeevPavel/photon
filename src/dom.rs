@@ -509,23 +509,20 @@ impl Controller {
     }
 
     pub fn mouse_wheel(&mut self, cursor_position: WorldPoint, delta: MouseScrollDelta) {
+        perf::on_get_mouse_wheel(self.log_id);
         let hit_result = self.api.hit_test(self.document_id, Some(self.pipeline_id), cursor_position, HitTestFlags::empty());
-        if hit_result.items.len() > 0 {
-            perf::log(perf::LogMessage::GetMouseWheel);
-        }
         const LINE_HEIGHT: f32 = 38.0;
         let delta_vector = match delta {
             glutin::MouseScrollDelta::LineDelta(dx, dy) => LayoutVector2D::new(-dx, -dy * LINE_HEIGHT),
             glutin::MouseScrollDelta::PixelDelta(pos) => LayoutVector2D::new(-pos.x as f32, -pos.y as f32),
         };
-
         let dom = self.dom_mutex.lock().unwrap();
         for item in hit_result.items {
             let (node_id, _) = item.tag;
             let node_type = &dom.nodes.get(&node_id).unwrap().node_type;
-            self.log_id += 1;
-            perf::log(perf::LogMessage::SendMouseWheel { log_id: self.log_id });
+            perf::on_send_mouse_wheel(self.log_id);
             node_type.on_wheel(&mut self.stream, self.log_id, node_id, &delta_vector);
+            self.log_id += 1;
         }
     }
 }
@@ -554,7 +551,7 @@ impl NoriaClient {
             let mut epoch = Epoch(0);
             loop {
                 let msg = read_msg(&mut read_stream);
-                perf::log(perf::LogMessage::GetNoriaMessage);
+                perf::on_get_noria_message();
                 if let Some(msg) = msg {
                     let mut dom = updater.dom_mutex.lock().unwrap();
                     let mut txn = Transaction::new();
@@ -576,8 +573,7 @@ impl NoriaClient {
                         epoch.0 += 1;
                     }
                     txn.generate_frame();
-                    perf::push_log_ids(log_ids.clone());
-                    perf::log(perf::LogMessage::SendTransaction { log_ids });
+                    perf::on_send_transaction(log_ids);
                     updater.api.send_transaction(updater.document_id, txn);
                 } else {
                     break;
