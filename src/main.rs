@@ -7,6 +7,7 @@ mod dom;
 mod transport;
 mod perf;
 
+use gleam::gl;
 use std::fs::File;
 use std::io::{Read, BufReader};
 
@@ -33,7 +34,7 @@ fn create_window(events_loop: &EventsLoop) -> GlWindow {
         .with_dimensions((1250, 900).into());
     let context = glutin::ContextBuilder::new()
         .with_vsync(true)
-        .with_double_buffer(Some(true))
+//        .with_double_buffer(Some(true))
 //        .with_multisampling(4)
         .with_srgb(true);
     return GlWindow::new(window_builder, context, &events_loop).unwrap();
@@ -55,6 +56,9 @@ fn create_webrender(gl_window: &GlWindow, events_loop: &EventsLoop) -> (Renderer
         ..webrender::RendererOptions::default()
     };
     let notifier = Box::new(Notifier::new(events_loop.create_proxy()));
+    gl.clear_color(0.6, 0.6, 0.6, 1.0);
+    gl.clear(gl::COLOR_BUFFER_BIT);
+    gl.finish();
     return webrender::Renderer::new(gl, notifier, opts, None).unwrap();
 }
 
@@ -235,10 +239,14 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
             perf::on_new_frame_ready();
             let start = Instant::now();
             renderer.update();
+            let gl = renderer.device.rc_gl().as_ref();
+            gl.clear_color(1.0, 1.0, 1.0, 0.0);
+            gl.clear(gleam::gl::COLOR_BUFFER_BIT);
             renderer.render(framebuffer_size).unwrap();
-            renderer.flush_pipeline_info();
+//            renderer.flush_pipeline_info();
+
             gl_window.swap_buffers().unwrap();
-            perf::log(perf::LogMessage::SwapTime { t: start.elapsed() });
+            perf::on_new_frame_done();
         }
 
         return glutin::ControlFlow::Continue;

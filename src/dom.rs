@@ -414,6 +414,7 @@ fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: &Vec
         match update {
             UpdateOrLogId::LogIds(ids) => {
                 log_ids = ids;
+                perf::on_get_noria_message(log_ids.clone());
             }
             UpdateOrLogId::Update(update) => {
                 match update {
@@ -476,7 +477,6 @@ pub struct NoriaClient {
 pub struct Controller {
     dom_mutex: Arc<Mutex<Dom>>,
     stream: TcpStream,
-    log_id: u64,
     document_id: DocumentId,
     pipeline_id: PipelineId,
     api: RenderApi,
@@ -487,7 +487,6 @@ impl Clone for Controller {
         Controller {
             dom_mutex: self.dom_mutex.clone(),
             stream: self.stream.try_clone().expect("Can't clone stream"),
-            log_id: self.log_id, // TODO shared log_id counter?
             document_id: self.document_id,
             pipeline_id: self.pipeline_id,
             api: self.api.clone_sender().create_api(),
@@ -502,14 +501,13 @@ impl Controller {
         for item in hit_result.items {
             let (node_id, _) = item.tag;
             let node_type = &dom.nodes.get(&node_id).unwrap().node_type;
-            self.log_id += 1;
-            node_type.on_click(&mut self.stream, self.log_id, node_id, &item.point_relative_to_item);
+            node_type.on_click(&mut self.stream, 0, node_id, &item.point_relative_to_item); // TODO LOG_ID!!
 
         }
     }
 
     pub fn mouse_wheel(&mut self, cursor_position: WorldPoint, delta: MouseScrollDelta) {
-        perf::on_get_mouse_wheel(self.log_id);
+        let log_id = perf::on_get_mouse_wheel();
         let hit_result = self.api.hit_test(self.document_id, Some(self.pipeline_id), cursor_position, HitTestFlags::empty());
         const LINE_HEIGHT: f32 = 38.0;
         let delta_vector = match delta {
@@ -520,9 +518,8 @@ impl Controller {
         for item in hit_result.items {
             let (node_id, _) = item.tag;
             let node_type = &dom.nodes.get(&node_id).unwrap().node_type;
-            perf::on_send_mouse_wheel(self.log_id);
-            node_type.on_wheel(&mut self.stream, self.log_id, node_id, &delta_vector);
-            self.log_id += 1;
+            perf::on_send_mouse_wheel(log_id);
+            node_type.on_wheel(&mut self.stream, log_id, node_id, &delta_vector);
         }
     }
 }
@@ -551,7 +548,6 @@ impl NoriaClient {
             let mut epoch = Epoch(0);
             loop {
                 let msg = read_msg(&mut read_stream);
-                perf::on_get_noria_message();
                 if let Some(msg) = msg {
                     let mut dom = updater.dom_mutex.lock().unwrap();
                     let mut txn = Transaction::new();
@@ -583,7 +579,6 @@ impl NoriaClient {
         Controller {
             dom_mutex: dom_mutex,
             stream: stream,
-            log_id: 0,
             document_id: document_id,
             pipeline_id: pipeline_id,
             api: sender.create_api(),
