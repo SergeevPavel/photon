@@ -548,6 +548,15 @@ impl NoriaClient {
                 if let Some(msg) = msg {
                     let mut dom = updater.dom_mutex.lock().unwrap();
                     let mut txn = Transaction::new();
+                    struct OnFrameRendered;
+                    impl NotificationHandler for OnFrameRendered {
+                        fn notify(&self, when: Checkpoint) {
+                            println!("{:?}", when);
+                        }
+                    }
+                    let on_frame_rendered = Box::new(OnFrameRendered);
+
+                    txn.notify(NotificationRequest::new(Checkpoint::FrameRendered, on_frame_rendered));
                     let mut context = ApplyUpdatesContext {
                         pipeline_id: pipeline_id,
                         fonts_manager: &mut updater.fonts_manager,
@@ -563,10 +572,11 @@ impl NoriaClient {
                             builder.finalize(),
                             true,
                         );
-                        epoch.0 += 1;
                     } else {
                         txn.skip_scene_builder();
                     }
+                    txn.update_epoch(updater.pipeline_id, epoch);
+                    epoch.0 += 1;
                     txn.generate_frame();
                     perf::on_send_transaction(log_ids);
                     updater.api.send_transaction(updater.document_id, txn);
