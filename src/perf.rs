@@ -9,7 +9,7 @@ static mut PERF_LOG: Option<PerfLog> = None;
 
 pub enum LogMessage {
     Raw(String),
-    FrameMetrics(FrameMetrics)
+    FrameMetrics(FrameMetrics, Vec<LogId>)
 }
 
 struct FrameMetrics {
@@ -80,9 +80,9 @@ pub fn print() {
     loop {
         if let Ok(msg) = get_state().messages.pop() {
             match msg {
-                LogMessage::FrameMetrics(metrics) => {
+                LogMessage::FrameMetrics(metrics, log_ids) => {
                     let total = metrics.frame_done.unwrap() - metrics.frame_start;
-                    if total.as_millis() > 16 {
+                    if total.as_millis() > 0 {
                         let hit_test_time = metrics.after_hit_test.unwrap() - metrics.frame_start;
                         let background_metrics = metrics.background_thread_metrics.unwrap();
                         let noria_time = background_metrics.get_noria_message.unwrap()- metrics.after_hit_test.unwrap();
@@ -93,6 +93,7 @@ pub fn print() {
 
                         let wr_total = hit_test_time + prepare_transaction_time + build_frame_time + render_time;
                         println!("total: {:>10} \
+                                  log_ids: {:>10} \
                                   wr total: {:>10} \
                                   noria: {:>10} \
                                   hit_test: {:>10} \
@@ -102,6 +103,7 @@ pub fn print() {
                                   swap: {:>10} \
                                   cpu backend: {:>10}",
                                  format!("{:.2?}", total),
+                                 format!("{:?}", log_ids),
                                  format!("{:.2?}", wr_total),
                                  format!("{:.2?}", noria_time),
                                  format!("{:.2?}", hit_test_time),
@@ -174,13 +176,13 @@ pub fn on_frame_rendered() {
 pub fn on_new_frame_done() {
     let state = get_state();
     if let Ok(background_metrics) = state.send_to_wr.pop() {
-        for log_id in background_metrics.clone().log_ids.unwrap() {
+        for log_id in background_metrics.log_ids.clone().unwrap() {
             let mut frame = state.frames.remove(&log_id).unwrap();
             frame.background_thread_metrics = Some(background_metrics.clone());
             frame.frame_ready = state.new_frame_ready.clone();
             frame.frame_rendered = state.frame_rendered.clone();
             frame.frame_done = Some(Instant::now());
-            state.messages.push(LogMessage::FrameMetrics(frame));
+            state.messages.push(LogMessage::FrameMetrics(frame, background_metrics.log_ids.clone().unwrap()));
         }
     }
 }

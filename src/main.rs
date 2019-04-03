@@ -193,7 +193,7 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                                 let mut controller = controller.clone();
                                 std::thread::spawn(move || {
                                     for _ in 0..2000 {
-                                        let delta = MouseScrollDelta::PixelDelta(glutin::dpi::LogicalPosition::new(0.0, -1.0));
+                                        let delta = MouseScrollDelta::PixelDelta(glutin::dpi::LogicalPosition::new(0.0, -5.0));
                                         controller.mouse_wheel(cursor_position, delta);
                                         std::thread::sleep(Duration::from_millis(16));
                                     }

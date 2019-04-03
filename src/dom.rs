@@ -174,7 +174,6 @@ impl NodeType {
                         let x = value["x"].as_f64().unwrap() as f32;
                         let y = value["y"].as_f64().unwrap() as f32;
                         context.txn.scroll_node_with_id(LayoutPoint::new(x, y), ExternalScrollId(node_id, context.pipeline_id), ScrollClamping::ToContentBounds);
-//                        context.txn.skip_scene_builder();
                         return false;
                     }
                     "on-wheel" => {
@@ -565,6 +564,8 @@ impl NoriaClient {
                             true,
                         );
                         epoch.0 += 1;
+                    } else {
+                        txn.skip_scene_builder();
                     }
                     txn.generate_frame();
                     perf::on_send_transaction(log_ids);
