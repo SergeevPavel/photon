@@ -1,5 +1,5 @@
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize};
 
 use serde_json::Value;
 

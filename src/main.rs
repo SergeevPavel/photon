@@ -21,7 +21,7 @@ use webrender::DebugFlags;
 use webrender::Renderer;
 
 use text::*;
-use std::time::{SystemTime, Instant, Duration};
+use std::time::{Duration};
 use std::env;
 use std::net::{ToSocketAddrs, Ipv4Addr};
 use serde::Deserialize;
@@ -34,7 +34,7 @@ fn create_window(events_loop: &EventsLoop) -> GlWindow {
         .with_dimensions((1250, 900).into());
     let context = glutin::ContextBuilder::new()
         .with_vsync(true)
-//        .with_double_buffer(Some(true))
+//        .with_double_buffer(Some(false))
 //        .with_multisampling(4)
         .with_srgb(true);
     return GlWindow::new(window_builder, context, &events_loop).unwrap();
@@ -59,7 +59,7 @@ fn create_webrender(gl_window: &GlWindow, events_loop: &EventsLoop) -> (Renderer
     gl.clear_color(0.6, 0.6, 0.6, 1.0);
     gl.clear(gl::COLOR_BUFFER_BIT);
     gl.finish();
-    return webrender::Renderer::new(gl, notifier, opts, None).unwrap();
+    return webrender::Renderer::new(gl, notifier, opts, None, framebuffer_size(gl_window)).unwrap();
 }
 
 fn framebuffer_size(gl_window: &GlWindow) -> FramebufferIntSize {
@@ -237,14 +237,20 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
 
         if need_repaint {
             perf::on_new_frame_ready();
-            let start = Instant::now();
             renderer.update();
-            let gl = renderer.device.rc_gl().as_ref();
-            gl.clear_color(1.0, 1.0, 1.0, 0.0);
-            gl.clear(gleam::gl::COLOR_BUFFER_BIT);
+            {
+                let gl = renderer.device.rc_gl().as_ref();
+                gl.clear_color(1.0, 1.0, 1.0, 0.0);
+                gl.clear(gleam::gl::COLOR_BUFFER_BIT);
+            }
             renderer.render(framebuffer_size).unwrap();
-//            renderer.flush_pipeline_info();
-
+            renderer.flush_pipeline_info();
+//            {
+//                let gl = renderer.device.rc_gl().as_ref();
+//                gl.flush();
+//                gl.finish();
+//            }
+            perf::on_frame_rendered();
             gl_window.swap_buffers().unwrap();
             perf::on_new_frame_done();
         }
@@ -312,8 +318,11 @@ impl webrender::api::RenderNotifier for Notifier {
         _render_time: Option<u64>,
     ) {
         debug!("{:?} {:?} {:?} {:?}", _document_id, _scrolled, composite_needed, _render_time);
-//        println!("{:?} {:?} {:?} {:?}", _document_id, _scrolled, composite_needed, _render_time.map(|t| t as f32 / 1000_000.0));
         if composite_needed {
+            _render_time.map(|t| {
+                let d = Duration::from_nanos(t);
+                perf::on_wake_up(d);
+            });
             self.events_proxy.wakeup().unwrap();
         }
     }

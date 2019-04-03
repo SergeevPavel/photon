@@ -2,11 +2,10 @@
 extern crate fxhash;
 use fxhash::FxHashMap;
 
-use std::thread;
 
 use std::io::prelude::*;
-use std::net::{TcpStream, ToSocketAddrs, Shutdown};
-use std::time::{SystemTime, UNIX_EPOCH, Instant};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use byteorder::{ReadBytesExt, BigEndian};
 use serde_json::Value;
@@ -18,9 +17,8 @@ use crate::transport::*;
 
 use euclid::TypedSize2D;
 use std::sync::{Mutex, Arc};
-use serde::{Serialize, Deserialize};
+use serde::{Serialize};
 use crate::text::FontsManager;
-use serde_json::error::ErrorCode::ControlCharacterWhileParsingString;
 use glutin::MouseScrollDelta;
 
 fn read_msg(stream: &mut TcpStream) -> Option<Vec<u8>> {
@@ -325,7 +323,7 @@ impl NodeType {
                         key: "on-click",
                         arguments: vec![point.x, point.y]
                     };
-                    stream.write(serde_json::to_string(&msg).unwrap().as_bytes());
+                    stream.write(serde_json::to_string(&msg).unwrap().as_bytes()).unwrap();
                 }
             }
             _ => ()
@@ -343,7 +341,7 @@ impl NodeType {
                         key: "on-wheel",
                         arguments: vec![delta.x, delta.y]
                     };
-                    stream.write(serde_json::to_string(&msg).unwrap().as_bytes());
+                    stream.write(serde_json::to_string(&msg).unwrap().as_bytes()).unwrap();
                 }
             }
             NodeType::Div { on_wheel, .. } => {
@@ -355,7 +353,7 @@ impl NodeType {
                         key: "on-wheel",
                         arguments: vec![delta.x, delta.y]
                     };
-                    stream.write(serde_json::to_string(&msg).unwrap().as_bytes());
+                    stream.write(serde_json::to_string(&msg).unwrap().as_bytes()).unwrap();
                 }
             }
             _ => ()
@@ -541,7 +539,7 @@ impl NoriaClient {
         };
         let mut stream = TcpStream::connect(addr).expect("No server here!");
         stream.set_nodelay(true).unwrap();
-        stream.write("{kind : \"webrender\"}".as_bytes());
+        stream.write("{kind : \"webrender\"}".as_bytes()).unwrap();
 
         let mut read_stream = stream.try_clone().unwrap();
         std::thread::spawn(move || {
@@ -558,7 +556,7 @@ impl NoriaClient {
                     };
                     let (rebuild_display_list, log_ids) = apply_updates(&mut dom, &mut context, &msg);
                     if rebuild_display_list {
-                        let mut builder = updater.build_display_list(&mut dom);
+                        let builder = updater.build_display_list(&mut dom);
                         txn.set_display_list(
                             epoch,
                             Some(ColorF::BLACK),

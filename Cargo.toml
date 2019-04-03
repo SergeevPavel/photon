@@ -7,7 +7,7 @@ edition = "2018"
 [dependencies]
 log = "*"
 glutin = "0.19.0"
-gleam = "0.6.14"
+gleam = "0.6.15"
 euclid = "0.19.5"
 env_logger = "0.6.0"
 app_units = "0.7.1"
@@ -19,5 +19,5 @@ crossbeam = "*"
 
 [dependencies.webrender]
 git = "https://github.com/servo/webrender"
-rev = "4f29a15d64db6dcb19df1449b24dabd660bfdc5f"
+rev = "e2dd5aa76af2775f1da110f70c6a05159bd725d5"
 # features = ["pathfinder"]

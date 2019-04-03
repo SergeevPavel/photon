@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::fs::File;
 use std::io::Read;
-use app_units::Au;
 
 use webrender::api::*;
 use webrender::api::units::*;

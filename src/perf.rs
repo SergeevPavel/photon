@@ -1,10 +1,7 @@
 use crossbeam::queue::{SegQueue, ArrayQueue};
-use crossbeam::atomic::AtomicCell;
 use std::time::{Duration, Instant};
-use std::fmt::{Display, Formatter, Error};
-use core::fmt::Write;
-use core::borrow::Borrow;
 use fxhash::FxHashMap;
+use core::fmt::Debug;
 
 type LogId = u64;
 
@@ -19,6 +16,7 @@ struct FrameMetrics {
     frame_start: Instant,
     after_hit_test: Option<Instant>,
     frame_ready: Option<Instant>,
+    frame_rendered: Option<Instant>,
     frame_done: Option<Instant>,
     background_thread_metrics: Option<BackgroundThreadMetrics>
 }
@@ -28,6 +26,7 @@ struct PerfLog {
     next_log_id: LogId,
     frames: FxHashMap<LogId, FrameMetrics>,
     new_frame_ready: Option<Instant>,
+    frame_rendered: Option<Instant>,
     messages: SegQueue<LogMessage>,
 
     // Forward msgs from Background to Main thread
@@ -42,6 +41,8 @@ struct BackgroundThreadMetrics {
     log_ids: Option<Vec<LogId>>,
     get_noria_message: Option<Instant>,
     send_transaction: Option<Instant>,
+    get_wake_up: Option<Instant>,
+    cpu_backend_time: Option<Duration>
 }
 
 pub fn init() {
@@ -50,12 +51,15 @@ pub fn init() {
             next_log_id: 0,
             frames: Default::default(),
             new_frame_ready: None,
+            frame_rendered: None,
             messages: SegQueue::new(),
             send_to_wr: ArrayQueue::new(100),
             background_thread_metrics: BackgroundThreadMetrics {
                 log_ids: None,
                 get_noria_message: None,
-                send_transaction: None
+                send_transaction: None,
+                get_wake_up: None,
+                cpu_backend_time: None
             }
         });
     }
@@ -84,15 +88,28 @@ pub fn print() {
                         let noria_time = background_metrics.get_noria_message.unwrap()- metrics.after_hit_test.unwrap();
                         let prepare_transaction_time = background_metrics.send_transaction.unwrap() - background_metrics.get_noria_message.unwrap();
                         let build_frame_time = metrics.frame_ready.unwrap() - background_metrics.send_transaction.unwrap();
-                        let swap_time = metrics.frame_done.unwrap() - metrics.frame_ready.unwrap();
-                        println!("total: {:?} wr total: {:?} hit_test: {:?} noria: {:?} prepare transaction: {:?} build_frame: {:?} swap: {:?}",
-                                 total,
-                                 hit_test_time + prepare_transaction_time + build_frame_time + swap_time,
-                                 hit_test_time,
-                                 noria_time,
-                                 prepare_transaction_time,
-                                 build_frame_time,
-                                 swap_time);
+                        let render_time = metrics.frame_rendered.unwrap() - metrics.frame_ready.unwrap();
+                        let swap_time = metrics.frame_done.unwrap() - metrics.frame_rendered.unwrap();
+
+                        let wr_total = hit_test_time + prepare_transaction_time + build_frame_time + render_time;
+                        println!("total: {:>10} \
+                                  wr total: {:>10} \
+                                  noria: {:>10} \
+                                  hit_test: {:>10} \
+                                  prepare transaction: {:>10} \
+                                  build_frame: {:>10} \
+                                  render frame: {:>10} \
+                                  swap: {:>10} \
+                                  cpu backend: {:>10}",
+                                 format!("{:.2?}", total),
+                                 format!("{:.2?}", wr_total),
+                                 format!("{:.2?}", noria_time),
+                                 format!("{:.2?}", hit_test_time),
+                                 format!("{:.2?}", prepare_transaction_time),
+                                 format!("{:.2?}", build_frame_time),
+                                 format!("{:.2?}", render_time),
+                                 format!("{:.2?}", swap_time),
+                                 format!("{:.2?}", background_metrics.cpu_backend_time.unwrap()));
                     }
                 }
                 _ => ()
@@ -113,6 +130,7 @@ pub fn on_get_mouse_wheel() -> LogId {
         frame_start: Instant::now(),
         after_hit_test: None,
         frame_ready: None,
+        frame_rendered: None,
         frame_done: None,
         background_thread_metrics: None
     });
@@ -120,7 +138,7 @@ pub fn on_get_mouse_wheel() -> LogId {
 }
 
 pub fn on_send_mouse_wheel(log_id: LogId) {
-    let mut state = get_state();
+    let state = get_state();
     let frame = state.frames.get_mut(&log_id).unwrap();
      frame.after_hit_test = Some(Instant::now());
 
@@ -135,12 +153,22 @@ pub fn on_get_noria_message(log_ids: Vec<LogId>) {
 pub fn on_send_transaction(log_ids: Vec<LogId>) {
     let mut state = get_state();
     state.background_thread_metrics.send_transaction = Some(Instant::now());
-    state.send_to_wr.push(state.background_thread_metrics.clone());
+    state.send_to_wr.push(state.background_thread_metrics.clone()).unwrap();
+}
+
+pub fn on_wake_up(d: Duration) {
+    let mut state = get_state();
+    state.background_thread_metrics.get_wake_up = Some(Instant::now());
+    state.background_thread_metrics.cpu_backend_time = Some(d);
 }
 
 pub fn on_new_frame_ready() {
     let state = get_state();
     state.new_frame_ready = Some(Instant::now());
+}
+
+pub fn on_frame_rendered() {
+    get_state().frame_rendered = Some(Instant::now());
 }
 
 pub fn on_new_frame_done() {
@@ -149,8 +177,9 @@ pub fn on_new_frame_done() {
         for log_id in background_metrics.clone().log_ids.unwrap() {
             let mut frame = state.frames.remove(&log_id).unwrap();
             frame.background_thread_metrics = Some(background_metrics.clone());
+            frame.frame_ready = state.new_frame_ready.clone();
+            frame.frame_rendered = state.frame_rendered.clone();
             frame.frame_done = Some(Instant::now());
-            frame.frame_ready = Some(state.new_frame_ready.unwrap().clone());
             state.messages.push(LogMessage::FrameMetrics(frame));
         }
     }
