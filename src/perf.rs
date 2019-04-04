@@ -1,4 +1,5 @@
 use crossbeam::queue::{SegQueue, ArrayQueue};
+use crossbeam::atomic::AtomicCell;
 use std::time::{Duration, Instant};
 use fxhash::FxHashMap;
 use core::fmt::Debug;
@@ -23,7 +24,7 @@ struct FrameMetrics {
 
 struct PerfLog {
     // Mutated by Main thread
-    next_log_id: LogId,
+    next_log_id: AtomicCell<LogId>,
     frames: FxHashMap<LogId, FrameMetrics>,
     new_frame_ready: Option<Instant>,
     frame_rendered: Option<Instant>,
@@ -48,7 +49,7 @@ struct BackgroundThreadMetrics {
 pub fn init() {
     unsafe {
         PERF_LOG = Some(PerfLog {
-            next_log_id: 0,
+            next_log_id: AtomicCell::new(0),
             frames: Default::default(),
             new_frame_ready: None,
             frame_rendered: None,
@@ -126,8 +127,7 @@ pub fn print() {
 
 pub fn on_get_mouse_wheel() -> LogId {
     let mut state = get_state();
-    let log_id = state.next_log_id;
-    state.next_log_id += 1;
+    let log_id = state.next_log_id.fetch_add(1);
     state.frames.insert(log_id, FrameMetrics {
         frame_start: Instant::now(),
         after_hit_test: None,
