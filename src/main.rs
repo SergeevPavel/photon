@@ -1,6 +1,7 @@
 extern crate euclid;
 extern crate byteorder;
 #[macro_use] extern crate log;
+#[macro_use] extern crate thread_profiler;
 
 mod text;
 mod dom;
@@ -25,7 +26,7 @@ use std::time::{Duration};
 use std::env;
 use std::net::{ToSocketAddrs, Ipv4Addr};
 use serde::Deserialize;
-
+use thread_profiler::{register_thread_with_profiler};
 
 fn create_window(events_loop: &EventsLoop) -> GlWindow {
     let window_builder = glutin::WindowBuilder::new()
@@ -187,11 +188,15 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                         glutin::VirtualKeyCode::D => {
                             perf::print();
                         }
+                        glutin::VirtualKeyCode::W => {
+                            renderer.save_cpu_profile("profile.json");
+                        }
                         glutin::VirtualKeyCode::Space => {
                             {
                                 let cursor_position = cursor_position.clone();
                                 let mut controller = controller.clone();
                                 std::thread::spawn(move || {
+                                    register_thread_with_profiler("Feeder".to_owned());
                                     for _ in 0..2000 {
                                         let delta = MouseScrollDelta::PixelDelta(glutin::dpi::LogicalPosition::new(0.0, -5.0));
                                         controller.mouse_wheel(cursor_position, delta);
@@ -251,6 +256,7 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
 //                gl.finish();
 //            }
             perf::on_frame_rendered();
+            profile_scope!("Swap buffers");
             gl_window.swap_buffers().unwrap();
             perf::on_new_frame_done();
         }
@@ -317,6 +323,7 @@ impl webrender::api::RenderNotifier for Notifier {
         composite_needed: bool,
         _render_time: Option<u64>,
     ) {
+        profile_scope!("wake up!");
         debug!("{:?} {:?} {:?} {:?}", _document_id, _scrolled, composite_needed, _render_time);
         if composite_needed {
             _render_time.map(|t| {

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use fxhash::FxHashMap;
 use core::fmt::Debug;
 
-type LogId = u64;
+pub type LogId = u64;
 
 static mut PERF_LOG: Option<PerfLog> = None;
 
@@ -152,7 +152,7 @@ pub fn on_get_noria_message(log_ids: Vec<LogId>) {
     state.background_thread_metrics.get_noria_message = Some(Instant::now());
 }
 
-pub fn on_send_transaction(log_ids: Vec<LogId>) {
+pub fn on_send_transaction(log_ids: &Vec<LogId>) {
     let mut state = get_state();
     state.background_thread_metrics.send_transaction = Some(Instant::now());
     state.send_to_wr.push(state.background_thread_metrics.clone()).unwrap();

@@ -20,6 +20,7 @@ use std::sync::{Mutex, Arc};
 use serde::{Serialize};
 use crate::text::FontsManager;
 use glutin::MouseScrollDelta;
+use thread_profiler::{register_thread_with_profiler};
 
 fn read_msg(stream: &mut TcpStream) -> Option<Vec<u8>> {
     let size = stream.read_u32::<BigEndian>().unwrap();
@@ -399,6 +400,7 @@ struct Dom {
 }
 
 fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: &Vec<u8>) -> (bool, Vec<u64>) {
+    profile_scope!("apply updates");
     let updates = if let Some(updates) = serde_json::from_slice::<NoriaUpdates>(&message).ok() {
         updates
     } else {
@@ -491,6 +493,10 @@ impl Clone for Controller {
     }
 }
 
+fn leak_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
 impl Controller {
     pub fn mouse_click(&mut self, cursor_position: WorldPoint) {
         let hit_result = self.api.hit_test(self.document_id, Some(self.pipeline_id), cursor_position, HitTestFlags::empty());
@@ -505,6 +511,7 @@ impl Controller {
 
     pub fn mouse_wheel(&mut self, cursor_position: WorldPoint, delta: MouseScrollDelta) {
         let log_id = perf::on_get_mouse_wheel();
+        profile_scope!(leak_str(format!("Mouse wheel {}", log_id)));
         let hit_result = self.api.hit_test(self.document_id, Some(self.pipeline_id), cursor_position, HitTestFlags::empty());
         const LINE_HEIGHT: f32 = 38.0;
         let delta_vector = match delta {
@@ -518,6 +525,13 @@ impl Controller {
             perf::on_send_mouse_wheel(log_id);
             node_type.on_wheel(&mut self.stream, log_id, node_id, &delta_vector);
         }
+    }
+}
+
+struct TransactionNotificationHandler(Vec<perf::LogId>);
+impl NotificationHandler for TransactionNotificationHandler {
+    fn notify(&self, when: Checkpoint) {
+        profile_scope!(leak_str(format!("Transaction Notify {:?} {:?}", when, self.0)));
     }
 }
 
@@ -542,28 +556,22 @@ impl NoriaClient {
 
         let mut read_stream = stream.try_clone().unwrap();
         std::thread::spawn(move || {
+            register_thread_with_profiler("Noria updater".to_owned());
             let mut epoch = Epoch(0);
             loop {
                 let msg = read_msg(&mut read_stream);
                 if let Some(msg) = msg {
                     let mut dom = updater.dom_mutex.lock().unwrap();
                     let mut txn = Transaction::new();
-                    struct OnFrameRendered;
-                    impl NotificationHandler for OnFrameRendered {
-                        fn notify(&self, when: Checkpoint) {
-                            println!("{:?}", when);
-                        }
-                    }
-                    let on_frame_rendered = Box::new(OnFrameRendered);
-
-                    txn.notify(NotificationRequest::new(Checkpoint::FrameRendered, on_frame_rendered));
                     let mut context = ApplyUpdatesContext {
                         pipeline_id: pipeline_id,
                         fonts_manager: &mut updater.fonts_manager,
                         txn: &mut txn
                     };
                     let (rebuild_display_list, log_ids) = apply_updates(&mut dom, &mut context, &msg);
+                    profile_scope!(leak_str(format!("Send TX {:?}", log_ids)));
                     if rebuild_display_list {
+                        profile_scope!("rebuild DL");
                         let builder = updater.build_display_list(&mut dom);
                         txn.set_display_list(
                             epoch,
@@ -572,13 +580,15 @@ impl NoriaClient {
                             builder.finalize(),
                             true,
                         );
+
                     } else {
                         txn.skip_scene_builder();
                     }
                     txn.update_epoch(updater.pipeline_id, epoch);
                     epoch.0 += 1;
                     txn.generate_frame();
-                    perf::on_send_transaction(log_ids);
+                    perf::on_send_transaction(&log_ids);
+                    txn.notify(NotificationRequest::new(Checkpoint::FrameRendered, Box::new(TransactionNotificationHandler(log_ids))));
                     updater.api.send_transaction(updater.document_id, txn);
                 } else {
                     break;
