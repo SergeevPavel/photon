@@ -2,3 +2,4 @@
 **/*.rs.bk
 .idea
 photon.iml
+profile.json

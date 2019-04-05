@@ -1,5 +1,6 @@
 extern crate euclid;
 extern crate byteorder;
+extern crate crossbeam;
 #[macro_use] extern crate log;
 #[macro_use] extern crate thread_profiler;
 
@@ -12,7 +13,7 @@ use gleam::gl;
 use std::fs::File;
 use std::io::{Read, BufReader};
 
-use glutin::{Event, ElementState, MouseButton, MouseScrollDelta};
+use glutin::{Event, ElementState, MouseButton, MouseScrollDelta, ControlFlow};
 use glutin::EventsLoop;
 use glutin::GlContext;
 use glutin::GlWindow;
@@ -27,6 +28,7 @@ use std::env;
 use std::net::{ToSocketAddrs, Ipv4Addr};
 use serde::Deserialize;
 use thread_profiler::{register_thread_with_profiler};
+use crossbeam::crossbeam_channel::{Sender, Receiver};
 
 fn create_window(events_loop: &EventsLoop) -> GlWindow {
     let window_builder = glutin::WindowBuilder::new()
@@ -41,7 +43,7 @@ fn create_window(events_loop: &EventsLoop) -> GlWindow {
     return GlWindow::new(window_builder, context, &events_loop).unwrap();
 }
 
-fn create_webrender(gl_window: &GlWindow, events_loop: &EventsLoop) -> (Renderer, RenderApiSender) {
+fn create_webrender(gl_window: &GlWindow, notifier: Box<RenderNotifier>) -> (Renderer, RenderApiSender) {
     let gl = match gl_window.get_api() {
         glutin::Api::OpenGl => unsafe {
             gleam::gl::GlFns::load_with(|symbol| gl_window.get_proc_address(symbol) as *const _)
@@ -56,7 +58,6 @@ fn create_webrender(gl_window: &GlWindow, events_loop: &EventsLoop) -> (Renderer
         device_pixel_ratio: device_pixel_ratio as f32,
         ..webrender::RendererOptions::default()
     };
-    let notifier = Box::new(Notifier::new(events_loop.create_proxy()));
     gl.clear_color(0.6, 0.6, 0.6, 1.0);
     gl.clear(gl::COLOR_BUFFER_BIT);
     gl.finish();
@@ -129,14 +130,67 @@ fn render_text_from_file(api: &RenderApi,
     api.send_transaction(document_id, txn);
 }
 
+enum UserEvent {
+    Scroll { cursor_position: WorldPoint, delta: MouseScrollDelta },
+    Repaint
+}
+
+#[derive(Clone)]
+struct EventLoopNotifier {
+    events_proxy: glutin::EventsLoopProxy,
+    pub recv: Receiver<UserEvent>,
+    sndr: Sender<UserEvent>,
+}
+
+impl EventLoopNotifier {
+    fn new(event_loop: &EventsLoop) -> Self {
+        let (sndr, recv) = crossbeam::crossbeam_channel::unbounded();
+        EventLoopNotifier {
+            events_proxy: event_loop.create_proxy(),
+            sndr,
+            recv
+        }
+    }
+    fn send(&self, event: UserEvent) {
+        self.sndr.send(event).unwrap();
+        self.events_proxy.wakeup();
+    }
+}
+
+impl webrender::api::RenderNotifier for EventLoopNotifier {
+    fn clone(&self) -> Box<RenderNotifier> {
+        Box::new(EventLoopNotifier {
+            events_proxy: self.events_proxy.clone(),
+            recv: self.recv.clone(),
+            sndr: self.sndr.clone()
+        })
+    }
+
+    fn wake_up(&self) {
+        self.send(UserEvent::Repaint)
+    }
+
+    fn new_frame_ready(&self, document_id: DocumentId, scrolled: bool, composite_needed: bool, render_time_ns: Option<u64>) {
+        profile_scope!("wake up!");
+        debug!("{:?} {:?} {:?} {:?}", document_id, scrolled, composite_needed, render_time_ns);
+        if composite_needed {
+            render_time_ns.map(|t| {
+                perf::on_wake_up(Duration::from_nanos(t));
+            });
+            self.send(UserEvent::Repaint);
+        }
+    }
+}
+
 fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
     let mut events_loop = EventsLoop::new();
+    let notifier = EventLoopNotifier::new(&events_loop);
     let gl_window = create_window(&events_loop);
     unsafe {
         gl_window.make_current().unwrap();
     }
 
-    let (mut renderer, sender) = create_webrender(&gl_window, &events_loop);
+    let (mut renderer, sender) = create_webrender(&gl_window, webrender::api::RenderNotifier::clone(&notifier));
     let api = sender.create_api();
 
     let framebuffer_size = framebuffer_size(&gl_window);
@@ -158,16 +212,33 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
     let mut cursor_position = WorldPoint::zero();
 
     events_loop.run_forever(|event| {
-        let mut need_repaint = false;
-
         match event {
             Event::Awakened => {
-                need_repaint = true;
+                match notifier.recv.recv().unwrap() {
+                    UserEvent::Scroll { cursor_position, delta } => {
+                        controller.mouse_wheel(cursor_position, delta);
+                    },
+                    UserEvent::Repaint => {
+                        perf::on_new_frame_ready();
+                        renderer.update();
+                        {
+                            let gl = renderer.device.rc_gl().as_ref();
+                            gl.clear_color(1.0, 1.0, 1.0, 0.0);
+                            gl.clear(gleam::gl::COLOR_BUFFER_BIT);
+                        }
+                        renderer.render(framebuffer_size).unwrap();
+                        renderer.flush_pipeline_info();
+                        perf::on_frame_rendered();
+                        profile_scope!("Swap buffers");
+                        gl_window.swap_buffers().unwrap();
+                        perf::on_new_frame_done();
+                    },
+                }
             },
             Event::WindowEvent { event: window_event, .. } => match window_event {
                 glutin::WindowEvent::CloseRequested
                 => {
-                    return glutin::ControlFlow::Break;
+                    return ControlFlow::Break;
                 }
 
                 glutin::WindowEvent::KeyboardInput {
@@ -192,19 +263,15 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                             renderer.save_cpu_profile("profile.json");
                         }
                         glutin::VirtualKeyCode::Space => {
-                            {
-                                let cursor_position = cursor_position.clone();
-                                let mut controller = controller.clone();
-                                std::thread::spawn(move || {
-                                    register_thread_with_profiler("Feeder".to_owned());
-                                    for _ in 0..2000 {
-                                        let delta = MouseScrollDelta::PixelDelta(glutin::dpi::LogicalPosition::new(0.0, -5.0));
-                                        controller.mouse_wheel(cursor_position, delta);
-                                        std::thread::sleep(Duration::from_millis(16));
-                                    }
-                                });
-
-                            }
+                            let sender = Clone::clone(&notifier);
+                            let position = cursor_position;
+                            std::thread::spawn(move || {
+                                for _ in 0..2000 {
+                                    let delta = MouseScrollDelta::PixelDelta(glutin::dpi::LogicalPosition::new(0.0, -1.0));
+                                    sender.send(UserEvent::Scroll {cursor_position: position, delta});
+                                    std::thread::sleep(Duration::from_millis(16));
+                                }
+                            });
                         }
                         _ => {}
                     }
@@ -239,30 +306,9 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
             },
             _ => {}
         }
-
-        if need_repaint {
-            perf::on_new_frame_ready();
-            renderer.update();
-            {
-                let gl = renderer.device.rc_gl().as_ref();
-                gl.clear_color(1.0, 1.0, 1.0, 0.0);
-                gl.clear(gleam::gl::COLOR_BUFFER_BIT);
-            }
-            renderer.render(framebuffer_size).unwrap();
-            renderer.flush_pipeline_info();
-//            {
-//                let gl = renderer.device.rc_gl().as_ref();
-//                gl.flush();
-//                gl.finish();
-//            }
-            perf::on_frame_rendered();
-            profile_scope!("Swap buffers");
-            gl_window.swap_buffers().unwrap();
-            perf::on_new_frame_done();
-        }
-
-        return glutin::ControlFlow::Continue;
+        return ControlFlow::Continue;
     });
+
 
     renderer.deinit();
 }
@@ -293,44 +339,4 @@ fn main() -> std::io::Result<()> {
         run_event_loop((Ipv4Addr::new(127, 0, 0, 1), content.tcp_port));
     }
     return Ok(());
-}
-
-struct Notifier {
-    events_proxy: glutin::EventsLoopProxy,
-}
-
-impl Notifier {
-    fn new(events_proxy: glutin::EventsLoopProxy) -> Notifier {
-        Notifier { events_proxy }
-    }
-}
-
-impl webrender::api::RenderNotifier for Notifier {
-    fn clone(&self) -> Box<webrender::api::RenderNotifier> {
-        Box::new(Notifier {
-            events_proxy: self.events_proxy.clone(),
-        })
-    }
-
-    fn wake_up(&self) {
-        self.events_proxy.wakeup().unwrap();
-    }
-
-    fn new_frame_ready(
-        &self,
-        _document_id: webrender::api::DocumentId,
-        _scrolled: bool,
-        composite_needed: bool,
-        _render_time: Option<u64>,
-    ) {
-        profile_scope!("wake up!");
-        debug!("{:?} {:?} {:?} {:?}", _document_id, _scrolled, composite_needed, _render_time);
-        if composite_needed {
-            _render_time.map(|t| {
-                let d = Duration::from_nanos(t);
-                perf::on_wake_up(d);
-            });
-            self.events_proxy.wakeup().unwrap();
-        }
-    }
 }

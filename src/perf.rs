@@ -2,7 +2,6 @@ use crossbeam::queue::{SegQueue, ArrayQueue};
 use crossbeam::atomic::AtomicCell;
 use std::time::{Duration, Instant};
 use fxhash::FxHashMap;
-use core::fmt::Debug;
 
 pub type LogId = u64;
 
@@ -54,7 +53,7 @@ pub fn init() {
             new_frame_ready: None,
             frame_rendered: None,
             messages: SegQueue::new(),
-            send_to_wr: ArrayQueue::new(100),
+            send_to_wr: ArrayQueue::new(100000),
             background_thread_metrics: BackgroundThreadMetrics {
                 log_ids: None,
                 get_noria_message: None,
