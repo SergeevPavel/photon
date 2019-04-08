@@ -127,45 +127,45 @@ pub fn print() {
 pub fn on_get_mouse_wheel() -> LogId {
     let mut state = get_state();
     let log_id = state.next_log_id.fetch_add(1);
-    state.frames.insert(log_id, FrameMetrics {
-        frame_start: Instant::now(),
-        after_hit_test: None,
-        frame_ready: None,
-        frame_rendered: None,
-        frame_done: None,
-        background_thread_metrics: None
-    });
+//    state.frames.insert(log_id, FrameMetrics {
+//        frame_start: Instant::now(),
+//        after_hit_test: None,
+//        frame_ready: None,
+//        frame_rendered: None,
+//        frame_done: None,
+//        background_thread_metrics: None
+//    });
     log_id
 }
 
 pub fn on_send_mouse_wheel(log_id: LogId) {
-    let state = get_state();
-    let frame = state.frames.get_mut(&log_id).unwrap();
-     frame.after_hit_test = Some(Instant::now());
+//    let state = get_state();
+//    let frame = state.frames.get_mut(&log_id).unwrap();
+//     frame.after_hit_test = Some(Instant::now());
 
 }
 
 pub fn on_get_noria_message(log_ids: Vec<LogId>) {
-    let mut state = get_state();
-    state.background_thread_metrics.log_ids = Some(log_ids);
-    state.background_thread_metrics.get_noria_message = Some(Instant::now());
+//    let mut state = get_state();
+//    state.background_thread_metrics.log_ids = Some(log_ids);
+//    state.background_thread_metrics.get_noria_message = Some(Instant::now());
 }
 
 pub fn on_send_transaction(log_ids: &Vec<LogId>) {
-    let mut state = get_state();
-    state.background_thread_metrics.send_transaction = Some(Instant::now());
-    state.send_to_wr.push(state.background_thread_metrics.clone()).unwrap();
+//    let mut state = get_state();
+//    state.background_thread_metrics.send_transaction = Some(Instant::now());
+//    state.send_to_wr.push(state.background_thread_metrics.clone()).unwrap();
 }
 
 pub fn on_wake_up(d: Duration) {
-    let mut state = get_state();
-    state.background_thread_metrics.get_wake_up = Some(Instant::now());
-    state.background_thread_metrics.cpu_backend_time = Some(d);
+//    let mut state = get_state();
+//    state.background_thread_metrics.get_wake_up = Some(Instant::now());
+//    state.background_thread_metrics.cpu_backend_time = Some(d);
 }
 
 pub fn on_new_frame_ready() {
-    let state = get_state();
-    state.new_frame_ready = Some(Instant::now());
+//    let state = get_state();
+//    state.new_frame_ready = Some(Instant::now());
 }
 
 pub fn on_frame_rendered() {
@@ -173,15 +173,15 @@ pub fn on_frame_rendered() {
 }
 
 pub fn on_new_frame_done() {
-    let state = get_state();
-    if let Ok(background_metrics) = state.send_to_wr.pop() {
-        for log_id in background_metrics.log_ids.clone().unwrap() {
-            let mut frame = state.frames.remove(&log_id).unwrap();
-            frame.background_thread_metrics = Some(background_metrics.clone());
-            frame.frame_ready = state.new_frame_ready.clone();
-            frame.frame_rendered = state.frame_rendered.clone();
-            frame.frame_done = Some(Instant::now());
-            state.messages.push(LogMessage::FrameMetrics(frame, background_metrics.log_ids.clone().unwrap()));
-        }
-    }
+//    let state = get_state();
+//    if let Ok(background_metrics) = state.send_to_wr.pop() {
+//        for log_id in background_metrics.log_ids.clone().unwrap() {
+//            let mut frame = state.frames.remove(&log_id).unwrap();
+//            frame.background_thread_metrics = Some(background_metrics.clone());
+//            frame.frame_ready = state.new_frame_ready.clone();
+//            frame.frame_rendered = state.frame_rendered.clone();
+//            frame.frame_done = Some(Instant::now());
+//            state.messages.push(LogMessage::FrameMetrics(frame, background_metrics.log_ids.clone().unwrap()));
+//        }
+//    }
 }
