@@ -4,10 +4,21 @@ version = "0.1.0"
 authors = ["Pavel Sergeev <pavel.sergeev@jetbrains.com>"]
 edition = "2018"
 
+[replace]
+"https://github.com/rust-lang/crates.io-index#serde_derive:1.0.80" = { git = "https://github.com/servo/serde", branch = "deserialize_from_enums9", feature = "deserialize_in_place" }
+"https://github.com/rust-lang/crates.io-index#gfx-hal:0.1.0" = { git = "https://github.com/gfx-rs/gfx.git", rev="dea8caac9c09e907eeeb7a1d3d18fdd3e42062cb" }
+
+[features]
+default = []
+debug = ["webrender/capture", "webrender/debugger", "webrender/profiler"]
+gfx-hal = ["dirs"]
+dx12 = ["gfx-backend-dx12", "gfx-hal"]
+metal = ["gfx-backend-metal", "gfx-hal"]
+vulkan = ["gfx-backend-vulkan", "gfx-hal"]
+
 [dependencies]
 log = "*"
-glutin = "0.19.0"
-gleam = "0.6.15"
+winit = "0.18"
 euclid = "0.19.5"
 env_logger = "0.6.0"
 app_units = "0.7.1"
@@ -16,10 +27,27 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 fxhash = "0.2.1"
 crossbeam = "*"
-thread_profiler = { version = "*", features = ["thread_profiler"] }
+thread_profiler = { version = "*" }
+dirs = { version = "1.0", optional = true }
+webrender={ path="/Users/pavel/work/servo-things/metal/webrender/webrender", features = ["profiler"] }
 
-[dependencies.webrender]
-git = "https://github.com/servo/webrender"
-rev = "e2dd5aa76af2775f1da110f70c6a05159bd725d5"
+#[dependencies.webrender]
+#git = "https://github.com/szeged/webrender"
+#rev = "43e0a57152a107acef9e9fd951188a1304f69eaa"
 # features = ["pathfinder"]
 # features = ["thread_profiler"]
+
+[target.'cfg(windows)'.dependencies.gfx-backend-dx12]
+git = "https://github.com/gfx-rs/gfx.git"
+rev = "dea8caac9c09e907eeeb7a1d3d18fdd3e42062cb"
+optional = true
+
+[target.'cfg(target_os = "macos")'.dependencies.gfx-backend-metal]
+git = "https://github.com/gfx-rs/gfx.git"
+rev = "dea8caac9c09e907eeeb7a1d3d18fdd3e42062cb"
+optional = true
+
+[target.'cfg(not(target_os = "macos"))'.dependencies.gfx-backend-vulkan]
+git = "https://github.com/gfx-rs/gfx.git"
+rev = "dea8caac9c09e907eeeb7a1d3d18fdd3e42062cb"
+optional = true

@@ -10,7 +10,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use byteorder::{ReadBytesExt, BigEndian};
 use serde_json::Value;
 use webrender::api::*;
-use webrender::api::units::*;
 
 use crate::{text, perf};
 use crate::transport::*;
@@ -19,7 +18,6 @@ use euclid::TypedSize2D;
 use std::sync::{Mutex, Arc};
 use serde::{Serialize};
 use crate::text::FontsManager;
-use glutin::MouseScrollDelta;
 use thread_profiler::{register_thread_with_profiler};
 
 fn read_msg(stream: &mut TcpStream) -> Option<Vec<u8>> {
@@ -261,8 +259,7 @@ impl NodeType {
                                                                                 *position,
                                                                                 vec![],
                                                                                 None,
-                                                                                webrender::api::ScrollSensitivity::ScriptAndInputEvents,
-                                                                                LayoutVector2D::new(0.0, 0.0));
+                                                                                webrender::api::ScrollSensitivity::ScriptAndInputEvents);
                 context.space_and_clip_stack.push(scroll_space_and_clip);
                 let mut info = LayoutPrimitiveInfo::new(*content);
                 if on_wheel.is_some() {
@@ -509,14 +506,14 @@ impl Controller {
         }
     }
 
-    pub fn mouse_wheel(&mut self, cursor_position: WorldPoint, delta: MouseScrollDelta) {
+    pub fn mouse_wheel(&mut self, cursor_position: WorldPoint, delta: winit::MouseScrollDelta) {
         let log_id = perf::on_get_mouse_wheel();
         profile_scope!(leak_str(format!("Mouse wheel {}", log_id)));
         let hit_result = self.api.hit_test(self.document_id, Some(self.pipeline_id), cursor_position, HitTestFlags::empty());
         const LINE_HEIGHT: f32 = 38.0;
         let delta_vector = match delta {
-            glutin::MouseScrollDelta::LineDelta(dx, dy) => LayoutVector2D::new(-dx, -dy * LINE_HEIGHT),
-            glutin::MouseScrollDelta::PixelDelta(pos) => LayoutVector2D::new(-pos.x as f32, -pos.y as f32),
+            winit::MouseScrollDelta::LineDelta(dx, dy) => LayoutVector2D::new(-dx, -dy * LINE_HEIGHT),
+            winit::MouseScrollDelta::PixelDelta(pos) => LayoutVector2D::new(-pos.x as f32, -pos.y as f32),
         };
         let dom = self.dom_mutex.lock().unwrap();
         for item in hit_result.items {
@@ -555,46 +552,48 @@ impl NoriaClient {
         stream.write("{kind : \"webrender\"}".as_bytes()).unwrap();
 
         let mut read_stream = stream.try_clone().unwrap();
-        std::thread::spawn(move || {
-            register_thread_with_profiler("Noria updater".to_owned());
-            let mut epoch = Epoch(0);
-            loop {
-                let msg = read_msg(&mut read_stream);
-                if let Some(msg) = msg {
-                    let mut dom = updater.dom_mutex.lock().unwrap();
-                    let mut txn = Transaction::new();
-                    let mut context = ApplyUpdatesContext {
-                        pipeline_id: pipeline_id,
-                        fonts_manager: &mut updater.fonts_manager,
-                        txn: &mut txn
-                    };
-                    let (rebuild_display_list, log_ids) = apply_updates(&mut dom, &mut context, &msg);
-                    profile_scope!(leak_str(format!("Send TX {:?}", log_ids)));
-                    if rebuild_display_list {
-                        profile_scope!("rebuild DL");
-                        let builder = updater.build_display_list(&mut dom);
-                        txn.set_display_list(
-                            epoch,
-                            Some(ColorF::BLACK),
-                            updater.content_size,
-                            builder.finalize(),
-                            true,
-                        );
+        std::thread::Builder::new()
+            .name("Noria thread".to_owned())
+            .spawn(move || {
+                register_thread_with_profiler("Noria thread".to_owned());
+                let mut epoch = Epoch(0);
+                loop {
+                    let msg = read_msg(&mut read_stream);
+                    if let Some(msg) = msg {
+                        let mut dom = updater.dom_mutex.lock().unwrap();
+                        let mut txn = Transaction::new();
+                        let mut context = ApplyUpdatesContext {
+                            pipeline_id: pipeline_id,
+                            fonts_manager: &mut updater.fonts_manager,
+                            txn: &mut txn
+                        };
+                        let (rebuild_display_list, log_ids) = apply_updates(&mut dom, &mut context, &msg);
+                        profile_scope!(leak_str(format!("Send TX {:?}", log_ids)));
+                        if rebuild_display_list {
+                            profile_scope!("rebuild DL");
+                            let builder = updater.build_display_list(&mut dom);
+                            txn.set_display_list(
+                                epoch,
+                                Some(ColorF::WHITE),
+                                updater.content_size,
+                                builder.finalize(),
+                                true,
+                            );
 
+                        } else {
+                            txn.skip_scene_builder();
+                        }
+                        txn.update_epoch(updater.pipeline_id, epoch);
+                        epoch.0 += 1;
+                        txn.generate_frame();
+                        perf::on_send_transaction(&log_ids);
+                        txn.notify(NotificationRequest::new(Checkpoint::FrameRendered, Box::new(TransactionNotificationHandler(log_ids))));
+                        updater.api.send_transaction(updater.document_id, txn);
                     } else {
-                        txn.skip_scene_builder();
+                        break;
                     }
-                    txn.update_epoch(updater.pipeline_id, epoch);
-                    epoch.0 += 1;
-                    txn.generate_frame();
-                    perf::on_send_transaction(&log_ids);
-                    txn.notify(NotificationRequest::new(Checkpoint::FrameRendered, Box::new(TransactionNotificationHandler(log_ids))));
-                    updater.api.send_transaction(updater.document_id, txn);
-                } else {
-                    break;
                 }
-            }
-        });
+            });
         Controller {
             dom_mutex: dom_mutex,
             stream: stream,

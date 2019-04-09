@@ -1,134 +1,152 @@
 extern crate euclid;
 extern crate byteorder;
 extern crate crossbeam;
+extern crate winit;
 #[macro_use] extern crate log;
 #[macro_use] extern crate thread_profiler;
+
+#[cfg(feature = "dx12")]
+extern crate gfx_backend_dx12 as back;
+#[cfg(feature = "metal")]
+extern crate gfx_backend_metal as back;
+#[cfg(feature = "vulkan")]
+extern crate gfx_backend_vulkan as back;
 
 mod text;
 mod dom;
 mod transport;
 mod perf;
 
-use gleam::gl;
 use std::fs::File;
 use std::io::{Read, BufReader};
 
-use glutin::{Event, ElementState, MouseButton, MouseScrollDelta, ControlFlow};
-use glutin::EventsLoop;
-use glutin::GlContext;
-use glutin::GlWindow;
 use webrender::api::*;
-use webrender::api::units::*;
 use webrender::DebugFlags;
 use webrender::Renderer;
+#[cfg(feature = "gfx-hal")]
+use webrender::hal::Instance;
 
 use text::*;
 use std::time::{Duration};
 use std::env;
 use std::net::{ToSocketAddrs, Ipv4Addr};
 use serde::Deserialize;
-use thread_profiler::{register_thread_with_profiler};
 use crossbeam::crossbeam_channel::{Sender, Receiver};
+use winit::{Window, EventsLoop, MouseScrollDelta, Event, ControlFlow, ElementState, MouseButton, WindowEvent};
 
-fn create_window(events_loop: &EventsLoop) -> GlWindow {
-    let window_builder = glutin::WindowBuilder::new()
+
+fn create_webrender(event_loop: &winit::EventsLoop, notifier: Box<RenderNotifier>) -> (Window, Renderer<back::Backend>, RenderApiSender) {
+    let window_builder = winit::WindowBuilder::new()
         .with_title("photon")
         .with_resizable(false)
         .with_dimensions((1250, 900).into());
-    let context = glutin::ContextBuilder::new()
-        .with_vsync(true)
-//        .with_double_buffer(Some(false))
-//        .with_multisampling(4)
-        .with_srgb(true);
-    return GlWindow::new(window_builder, context, &events_loop).unwrap();
-}
 
-fn create_webrender(gl_window: &GlWindow, notifier: Box<RenderNotifier>) -> (Renderer, RenderApiSender) {
-    let gl = match gl_window.get_api() {
-        glutin::Api::OpenGl => unsafe {
-            gleam::gl::GlFns::load_with(|symbol| gl_window.get_proc_address(symbol) as *const _)
-        },
-        glutin::Api::OpenGlEs => unsafe {
-            gleam::gl::GlesFns::load_with(|symbol| gl_window.get_proc_address(symbol) as *const _)
-        },
-        glutin::Api::WebGl => unimplemented!(),
+    let (window, instance, adapter, surface) = {
+        let window = window_builder.build(&event_loop).unwrap();
+        let instance = back::Instance::create("gfx-rs instance", 1);
+        let mut adapters = instance.enumerate_adapters();
+        let adapter = adapters.remove(0);
+        let mut surface = instance.create_surface(&window);
+        (window, instance, adapter, surface)
     };
-    let device_pixel_ratio = gl_window.get_hidpi_factor();
+
+    let device_pixel_ratio = window.get_hidpi_factor();
     let opts = webrender::RendererOptions {
+        debug_flags: webrender::DebugFlags::PROFILER_DBG,
+        clear_color: Some(ColorF::WHITE),
         device_pixel_ratio: device_pixel_ratio as f32,
         ..webrender::RendererOptions::default()
     };
-    gl.clear_color(0.6, 0.6, 0.6, 1.0);
-    gl.clear(gl::COLOR_BUFFER_BIT);
-    gl.finish();
-    return webrender::Renderer::new(gl, notifier, opts, None, framebuffer_size(gl_window)).unwrap();
+    let winit::dpi::LogicalSize { width, height } = window.get_inner_size().unwrap();
+    let init = {
+        use std::path::PathBuf;
+        let cache_dir = dirs::cache_dir().expect("User's cache directory not found");
+        let cache_path = Some(PathBuf::from(&cache_dir).join("pipeline_cache.bin"));
+
+        webrender::DeviceInit {
+            instance: Box::new(instance),
+            adapter,
+            surface: Some(surface),
+            window_size: (width as i32, height as i32),
+            descriptor_count: None,
+            cache_path,
+            save_cache: true,
+        }
+    };
+    let (renderer, sender) = webrender::Renderer::new(init, notifier, opts, None).unwrap();
+    return (window, renderer, sender);
 }
 
-fn framebuffer_size(gl_window: &GlWindow) -> FramebufferIntSize {
-    let size = gl_window
-        .get_inner_size()
-        .unwrap()
-        .to_physical(gl_window.get_hidpi_factor());
-    FramebufferIntSize::new(size.width as i32, size.height as i32)
+fn framebuffer_size(window: &Window) -> DeviceIntSize {
+    let device_pixel_ratio = window.get_hidpi_factor() as f32;
+
+    let framebuffer_size = {
+        let size = window
+            .get_inner_size()
+            .unwrap()
+            .to_physical(device_pixel_ratio as f64);
+        DeviceIntSize::new(size.width as i32, size.height as i32)
+    };
+
+    framebuffer_size
 }
 
-fn render_text_from_file(api: &RenderApi,
-                         fonts_manager: &mut FontsManager,
-                         pipeline_id: PipelineId,
-                         document_id: DocumentId,
-                         layout_size: LayoutSize,
-                         epoch: &mut Epoch,
-                         file_path: String) {
-    let text_size = 16;
-    let text = get_text(file_path);
-
-    let mut txn = Transaction::new();
-    let mut builder = DisplayListBuilder::new(pipeline_id, layout_size);
-
-    let info = LayoutPrimitiveInfo::new(LayoutRect::new(LayoutPoint::zero(), builder.content_size()));
-    let root_space_and_clip = SpaceAndClipInfo::root_scroll(pipeline_id);
-    builder.push_simple_stacking_context(&info, root_space_and_clip.spatial_id);
-
-    let scroll_content_box = euclid::TypedRect::new(
-        euclid::TypedPoint2D::zero(),
-        euclid::TypedSize2D::new(2000.0, 100000.0),
-    );
-
-    let scroll_space_and_clip = builder.define_scroll_frame(
-        &root_space_and_clip,
-        None,
-        scroll_content_box,
-        euclid::TypedRect::new(euclid::TypedPoint2D::zero(), layout_size),
-        vec![],
-        None,
-        webrender::api::ScrollSensitivity::ScriptAndInputEvents,
-        LayoutVector2D::new(0.0, 0.0),
-    );
-
-    let mut info = LayoutPrimitiveInfo::new(scroll_content_box);
-    info.tag = Some((0, 1));
-    builder.push_rect(&info,
-                      &scroll_space_and_clip,
-                      ColorF::new(0.9, 0.9, 0.91, 1.0)
-    );
-
-    fonts_manager.show_text(&mut builder, &scroll_space_and_clip, text.as_str(), LayoutPoint::new(0.0, text_size as f32));
-
-    builder.pop_stacking_context();
-    epoch.0 += 1;
-
-    txn.set_display_list(
-        epoch.clone(),
-        None,
-        layout_size,
-        builder.finalize(),
-        true,
-    );
-
-    txn.set_root_pipeline(pipeline_id);
-    txn.generate_frame();
-    api.send_transaction(document_id, txn);
-}
+//fn render_text_from_file(api: &RenderApi,
+//                         fonts_manager: &mut FontsManager,
+//                         pipeline_id: PipelineId,
+//                         document_id: DocumentId,
+//                         layout_size: LayoutSize,
+//                         epoch: &mut Epoch,
+//                         file_path: String) {
+//    let text_size = 16;
+//    let text = get_text(file_path);
+//
+//    let mut txn = Transaction::new();
+//    let mut builder = DisplayListBuilder::new(pipeline_id, layout_size);
+//
+//    let info = LayoutPrimitiveInfo::new(LayoutRect::new(LayoutPoint::zero(), builder.content_size()));
+//    let root_space_and_clip = SpaceAndClipInfo::root_scroll(pipeline_id);
+//    builder.push_simple_stacking_context(&info, root_space_and_clip.spatial_id);
+//
+//    let scroll_content_box = euclid::TypedRect::new(
+//        euclid::TypedPoint2D::zero(),
+//        euclid::TypedSize2D::new(2000.0, 100000.0),
+//    );
+//
+//    let scroll_space_and_clip = builder.define_scroll_frame(
+//        &root_space_and_clip,
+//        None,
+//        scroll_content_box,
+//        euclid::TypedRect::new(euclid::TypedPoint2D::zero(), layout_size),
+//        vec![],
+//        None,
+//        webrender::api::ScrollSensitivity::ScriptAndInputEvents,
+//    );
+//
+//    let mut info = LayoutPrimitiveInfo::new(scroll_content_box);
+//    info.tag = Some((0, 1));
+//    builder.push_rect(&info,
+//                      &scroll_space_and_clip,
+//                      ColorF::new(0.9, 0.9, 0.91, 1.0)
+//    );
+//
+//    fonts_manager.show_text(&mut builder, &scroll_space_and_clip, text.as_str(), LayoutPoint::new(0.0, text_size as f32));
+//
+//    builder.pop_stacking_context();
+//    epoch.0 += 1;
+//
+//    txn.set_display_list(
+//        epoch.clone(),
+//        None,
+//        layout_size,
+//        builder.finalize(),
+//        true,
+//    );
+//
+//    txn.set_root_pipeline(pipeline_id);
+//    txn.generate_frame();
+//    api.send_transaction(document_id, txn);
+//}
 
 enum UserEvent {
     Scroll { cursor_position: WorldPoint, delta: MouseScrollDelta },
@@ -137,7 +155,7 @@ enum UserEvent {
 
 #[derive(Clone)]
 struct EventLoopNotifier {
-    events_proxy: glutin::EventsLoopProxy,
+    events_proxy: winit::EventsLoopProxy,
     pub recv: Receiver<UserEvent>,
     sndr: Sender<UserEvent>,
 }
@@ -185,17 +203,13 @@ impl webrender::api::RenderNotifier for EventLoopNotifier {
 fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
     let mut events_loop = EventsLoop::new();
     let notifier = EventLoopNotifier::new(&events_loop);
-    let gl_window = create_window(&events_loop);
-    unsafe {
-        gl_window.make_current().unwrap();
-    }
 
-    let (mut renderer, sender) = create_webrender(&gl_window, webrender::api::RenderNotifier::clone(&notifier));
+    let (mut window, mut renderer, sender) = create_webrender(&events_loop, webrender::api::RenderNotifier::clone(&notifier));
     let api = sender.create_api();
 
-    let framebuffer_size = framebuffer_size(&gl_window);
+    let framebuffer_size = framebuffer_size(&window);
 
-    let layout_size: LayoutSize = framebuffer_size.to_f32() / euclid::TypedScale::new(gl_window.get_hidpi_factor() as f32);
+    let layout_size: LayoutSize = framebuffer_size.to_f32() / euclid::TypedScale::new(window.get_hidpi_factor() as f32);
 
     let document_id = api.add_document(framebuffer_size, 0);
     let pipeline_id = webrender::api::PipelineId(0, 0);
@@ -221,53 +235,57 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                     UserEvent::Repaint => {
                         perf::on_new_frame_ready();
                         renderer.update();
-                        {
-                            let gl = renderer.device.rc_gl().as_ref();
-                            gl.clear_color(1.0, 1.0, 1.0, 0.0);
-                            gl.clear(gleam::gl::COLOR_BUFFER_BIT);
-                        }
+//                        {
+//                            let gl = renderer.device.rc_gl().as_ref();
+//                            gl.clear_color(1.0, 1.0, 1.0, 0.0);
+//                            gl.clear(gleam::gl::COLOR_BUFFER_BIT);
+//                        }
                         renderer.render(framebuffer_size).unwrap();
                         renderer.flush_pipeline_info();
                         perf::on_frame_rendered();
                         profile_scope!("Swap buffers");
-                        gl_window.swap_buffers().unwrap();
+//                        window.swap_buffers().unwrap();
                         perf::on_new_frame_done();
                     },
                 }
             },
             Event::WindowEvent { event: window_event, .. } => match window_event {
-                glutin::WindowEvent::CloseRequested
+                WindowEvent::CloseRequested
                 => {
                     return ControlFlow::Break;
                 }
 
-                glutin::WindowEvent::KeyboardInput {
-                    input: glutin::KeyboardInput {
-                        state: glutin::ElementState::Pressed,
+                WindowEvent::KeyboardInput {
+                    input: winit::KeyboardInput {
+                        state: ElementState::Pressed,
                         virtual_keycode: Some(code),
                         ..
                     },
                     ..
                 } => {
                     match code {
-                        glutin::VirtualKeyCode::P => {
+                        winit::VirtualKeyCode::P => {
+//                            let debug_renderer = renderer.debug_renderer().unwrap();
+//                            debug_renderer.add_text(10.0, 10.0, &"hello", ColorU::new(0, 0, 0, 255), None);
+//                            debug_renderer.render();
                             let mut debug_flags = renderer.get_debug_flags();
                             debug_flags.toggle(DebugFlags::PROFILER_DBG);
                             debug_flags.toggle(DebugFlags::GPU_TIME_QUERIES);
                             api.send_debug_cmd(DebugCommand::SetFlags(debug_flags));
                         }
-                        glutin::VirtualKeyCode::D => {
+                        winit::VirtualKeyCode::D => {
                             perf::print();
                         }
-                        glutin::VirtualKeyCode::W => {
+                        winit::VirtualKeyCode::W => {
+                            println!("Drop profile");
                             renderer.save_cpu_profile("profile.json");
                         }
-                        glutin::VirtualKeyCode::Space => {
+                        winit::VirtualKeyCode::Space => {
                             let sender = Clone::clone(&notifier);
                             let position = cursor_position;
                             std::thread::spawn(move || {
                                 for _ in 0..2000 {
-                                    let delta = MouseScrollDelta::PixelDelta(glutin::dpi::LogicalPosition::new(0.0, -1.0));
+                                    let delta = MouseScrollDelta::PixelDelta(winit::dpi::LogicalPosition::new(0.0, -1.0));
                                     sender.send(UserEvent::Scroll {cursor_position: position, delta});
                                     std::thread::sleep(Duration::from_millis(16));
                                 }
@@ -276,20 +294,20 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                         _ => {}
                     }
                 }
-                glutin::WindowEvent::CursorMoved {
-                    position: glutin::dpi::LogicalPosition { x, y },
+                winit::WindowEvent::CursorMoved {
+                    position: winit::dpi::LogicalPosition { x, y },
                     ..
                 } => {
                     cursor_position = WorldPoint::new(x as f32, y as f32);
                 }
-                glutin::WindowEvent::MouseInput {
+                winit::WindowEvent::MouseInput {
                     state, button, ..
                 } => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         controller.mouse_click(cursor_position);
                     }
                 }
-                glutin::WindowEvent::MouseWheel { delta, ..
+                winit::WindowEvent::MouseWheel { delta, ..
                 } => {
                     controller.mouse_wheel(cursor_position, delta);
 

@@ -3,7 +3,6 @@ use std::fs::File;
 use std::io::Read;
 
 use webrender::api::*;
-use webrender::api::units::*;
 use fxhash::FxHashMap;
 
 pub fn add_font<P: AsRef<Path>>(api: &RenderApi, txn: &mut Transaction, path: P) -> FontKey {
