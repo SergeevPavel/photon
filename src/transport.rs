@@ -46,6 +46,26 @@ pub struct SetAttr {
 }
 
 #[derive(Debug, Deserialize)]
+pub enum Callback {
+    #[serde(rename = "noria-handler-sync")]
+    Sync,
+    #[serde(rename = "noria-handler-async")]
+    Async,
+    #[serde(rename = "-noria-handler")]
+    None,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetCallback {
+    #[serde(rename = "node")]
+    pub node_id: u64,
+    #[serde(rename = "attr")]
+    pub attribute: String,
+    #[serde(rename = "value")]
+    pub callback: Callback,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(tag = "update-type")]
 pub enum Update {
     #[serde(rename = "make-node")]
@@ -57,8 +77,9 @@ pub enum Update {
     #[serde(rename = "remove")]
     Remove(Remove),
     #[serde(rename = "set-attr")]
-    SetAttr(SetAttr)
-
+    SetAttr(SetAttr),
+    #[serde(rename = "set-callback")]
+    SetCallback(SetCallback)
 }
 
 #[derive(Deserialize, Debug)]

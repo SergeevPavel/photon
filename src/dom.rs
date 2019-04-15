@@ -36,13 +36,6 @@ fn current_ts() -> u128 {
 
 type NodeId = u64;
 
-#[derive(Debug)]
-enum Callback {
-    Sync,
-    Async,
-    None,
-}
-
 impl Callback {
     fn is_some(&self) -> bool {
         match self {
@@ -81,14 +74,6 @@ fn parse_point(value: &Value) -> LayoutPoint {
                      value["y"].as_f64().unwrap() as f32)
 }
 
-fn parse_callback(value: &Value) -> Callback {
-    match value.as_str().unwrap() {
-        "noria-handler-sync" => { Callback::Sync }
-        "noria-handler-async" => { Callback::Async }
-        "-noria-handler" => { Callback::None }
-        _ => unreachable!()
-    }
-}
 
 #[derive(Serialize)]
 struct CallbackMessage<'a, T: Serialize> {
@@ -151,12 +136,6 @@ impl NodeType {
                     "rect" => {
                         *rect = parse_rect(value);
                     }
-                    "on-click" => {
-                        *on_click = parse_callback(value);
-                    }
-                    "on-wheel" => {
-                        *on_wheel = parse_callback(value);
-                    }
 
                     _ => ()
                 }
@@ -174,9 +153,6 @@ impl NodeType {
                         let y = value["y"].as_f64().unwrap() as f32;
                         context.txn.scroll_node_with_id(LayoutPoint::new(x, y), ExternalScrollId(node_id, context.pipeline_id), ScrollClamping::ToContentBounds);
                         return false;
-                    }
-                    "on-wheel" => {
-                        *on_wheel = parse_callback(value);
                     }
 
                     _ => ()
@@ -204,6 +180,36 @@ impl NodeType {
             }
         }
         return true;
+    }
+
+    fn set_callback(&mut self, context: &mut ApplyUpdatesContext, attribute: &str, callback: Callback) {
+        match self {
+            NodeType::Root => {
+
+            }
+            NodeType::Div { ref mut color, rect, on_click, on_wheel } => {
+                match attribute {
+                    "on-click" => {
+                        *on_click = callback;
+                    }
+                    "on-wheel" => {
+                        *on_wheel = callback;
+                    }
+
+                    _ => ()
+                }
+            }
+            NodeType::Scroll { ref mut position, content, on_wheel } => {
+                match attribute {
+                    "on-wheel" => {
+                        *on_wheel = callback;
+                    }
+
+                    _ => ()
+                }
+            }
+            NodeType::Text { ref mut text, origin, layouted_text, color } => {}
+        }
     }
 
     fn visit_down(&self, node_id: NodeId, context: &mut VisitorContext) {
@@ -454,6 +460,10 @@ fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: &Vec
                         let node = dom.nodes.get_mut(&node_id).unwrap();
                         need_rebuild |= node.node_type.set_attr(context, node_id, attribute.as_str(), &value);
                     }
+                    Update::SetCallback(SetCallback { node_id, attribute, callback }) => {
+                        let node = dom.nodes.get_mut(&node_id).unwrap();
+                        node.node_type.set_callback(context, attribute.as_str(), callback)
+                    }
                 }
             }
         }
@@ -555,7 +565,7 @@ impl NoriaClient {
         std::thread::Builder::new()
             .name("Noria thread".to_owned())
             .spawn(move || {
-                register_thread_with_profiler("Noria thread".to_owned());
+                register_thread_with_profiler();
                 let mut epoch = Epoch(0);
                 loop {
                     let msg = read_msg(&mut read_stream);
