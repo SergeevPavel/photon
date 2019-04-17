@@ -162,9 +162,7 @@ impl NodeType {
                 match attribute {
                     "text" => {
                         *text = value.as_str().unwrap().to_string();
-                        *layouted_text = Some(context.fonts_manager.layout_simple_ascii(text,
-                                                                                        LayoutPoint::new(0.0, 0.0),
-                                                                                        FontInstanceFlags::default()));
+                        *layouted_text = Some(context.fonts_manager.layout_simple_ascii(text));
                     }
                     "origin" => {
                         *origin = parse_point(value);
@@ -278,14 +276,20 @@ impl NodeType {
             NodeType::Text { text, origin, layouted_text, color } => {
                 if let Some(parent_space_and_clip) = context.space_and_clip_stack.last() {
                     if let Some(layouted_text) = layouted_text {
-                        let info = LayoutPrimitiveInfo::new(LayoutRect::new(*origin, layouted_text.bounding_rect.size));
+                        let info = LayoutPrimitiveInfo::new(LayoutRect::new(*origin, layouted_text.size));
                         context.builder.push_simple_stacking_context(&info, parent_space_and_clip.spatial_id);
-                        context.builder.push_text(&LayoutPrimitiveInfo::new(layouted_text.bounding_rect),
+//                        println!("{:?}", layouted_text);
+                        let info = LayoutPrimitiveInfo::new(LayoutRect::new(LayoutPoint::new(0.0, 0.0), layouted_text.size));
+//                        context.builder.push_rect(&info, &parent_space_and_clip, ColorF::new(0.3, 0.4, 0.2, 0.3));
+                        context.builder.push_text(&info,
                                                   &parent_space_and_clip,
                                                   layouted_text.glyphs.as_slice(),
                                                   context.fonts_manager.font_instance_key,
                                                   *color,
-                                                  None);
+                                                  Some(GlyphOptions {
+                                                      render_mode: FontRenderMode::Alpha,
+                                                      flags: FontInstanceFlags::FONT_SMOOTHING,
+                                                  }));
                     }
                 } else {
                     unreachable!("No parent space and clip");
@@ -477,7 +481,6 @@ pub struct NoriaClient {
     pipeline_id: PipelineId,
     document_id: DocumentId,
     content_size: LayoutSize,
-    fonts_manager: FontsManager
 }
 
 pub struct Controller {
@@ -545,7 +548,6 @@ impl NotificationHandler for TransactionNotificationHandler {
 impl NoriaClient {
     pub fn spawn<A: ToSocketAddrs>(addr: A, sender: RenderApiSender, pipeline_id: PipelineId, document_id: DocumentId, content_size: LayoutSize) -> Controller {
         let api = sender.create_api();
-        let fonts_manager = text::FontsManager::new(sender.create_api(), document_id);
 
         let dom_mutex = Arc::new(Mutex::new(Dom::default()));
 
@@ -555,7 +557,6 @@ impl NoriaClient {
             pipeline_id,
             document_id,
             content_size,
-            fonts_manager
         };
         let mut stream = TcpStream::connect(addr).expect("No server here!");
         stream.set_nodelay(true).unwrap();
@@ -565,7 +566,8 @@ impl NoriaClient {
         std::thread::Builder::new()
             .name("Noria thread".to_owned())
             .spawn(move || {
-                register_thread_with_profiler();
+                register_thread_with_profiler("Noria thread".to_owned());
+                let mut fonts_manager = text::FontsManager::new(updater.api.clone_sender().create_api(), updater.document_id);
                 let mut epoch = Epoch(0);
                 loop {
                     let msg = read_msg(&mut read_stream);
@@ -574,14 +576,14 @@ impl NoriaClient {
                         let mut txn = Transaction::new();
                         let mut context = ApplyUpdatesContext {
                             pipeline_id: pipeline_id,
-                            fonts_manager: &mut updater.fonts_manager,
+                            fonts_manager: &mut fonts_manager,
                             txn: &mut txn
                         };
                         let (rebuild_display_list, log_ids) = apply_updates(&mut dom, &mut context, &msg);
                         profile_scope!(leak_str(format!("Send TX {:?}", log_ids)));
                         if rebuild_display_list {
                             profile_scope!("rebuild DL");
-                            let builder = updater.build_display_list(&mut dom);
+                            let builder = updater.build_display_list(&mut dom, &mut fonts_manager);
                             txn.set_display_list(
                                 epoch,
                                 Some(ColorF::WHITE),
@@ -613,13 +615,13 @@ impl NoriaClient {
         }
     }
 
-    fn build_display_list(&self, dom: &Dom) -> DisplayListBuilder {
+    fn build_display_list(&self, dom: &Dom, fonts_manager: &mut FontsManager) -> DisplayListBuilder {
         let mut visitor_context = VisitorContext {
             nodes: &dom.nodes,
             builder: DisplayListBuilder::new(self.pipeline_id, self.content_size),
             space_and_clip_stack: Vec::new(),
             api: &self.api,
-            fonts_manager: &self.fonts_manager,
+            fonts_manager: fonts_manager,
         };
         if let Some(root_node_id) = dom.root_node {
             dom.nodes.get(&root_node_id).unwrap().visit(&mut visitor_context);

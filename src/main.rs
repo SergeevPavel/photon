@@ -2,6 +2,8 @@ extern crate euclid;
 extern crate byteorder;
 extern crate crossbeam;
 extern crate winit;
+extern crate harfbuzz;
+extern crate harfbuzz_sys;
 #[macro_use] extern crate log;
 #[macro_use] extern crate thread_profiler;
 
@@ -16,6 +18,7 @@ mod text;
 mod dom;
 mod transport;
 mod perf;
+mod text_layout;
 
 use std::fs::File;
 use std::io::{Read, BufReader};
@@ -91,63 +94,6 @@ fn framebuffer_size(window: &Window) -> DeviceIntSize {
     framebuffer_size
 }
 
-//fn render_text_from_file(api: &RenderApi,
-//                         fonts_manager: &mut FontsManager,
-//                         pipeline_id: PipelineId,
-//                         document_id: DocumentId,
-//                         layout_size: LayoutSize,
-//                         epoch: &mut Epoch,
-//                         file_path: String) {
-//    let text_size = 16;
-//    let text = get_text(file_path);
-//
-//    let mut txn = Transaction::new();
-//    let mut builder = DisplayListBuilder::new(pipeline_id, layout_size);
-//
-//    let info = LayoutPrimitiveInfo::new(LayoutRect::new(LayoutPoint::zero(), builder.content_size()));
-//    let root_space_and_clip = SpaceAndClipInfo::root_scroll(pipeline_id);
-//    builder.push_simple_stacking_context(&info, root_space_and_clip.spatial_id);
-//
-//    let scroll_content_box = euclid::TypedRect::new(
-//        euclid::TypedPoint2D::zero(),
-//        euclid::TypedSize2D::new(2000.0, 100000.0),
-//    );
-//
-//    let scroll_space_and_clip = builder.define_scroll_frame(
-//        &root_space_and_clip,
-//        None,
-//        scroll_content_box,
-//        euclid::TypedRect::new(euclid::TypedPoint2D::zero(), layout_size),
-//        vec![],
-//        None,
-//        webrender::api::ScrollSensitivity::ScriptAndInputEvents,
-//    );
-//
-//    let mut info = LayoutPrimitiveInfo::new(scroll_content_box);
-//    info.tag = Some((0, 1));
-//    builder.push_rect(&info,
-//                      &scroll_space_and_clip,
-//                      ColorF::new(0.9, 0.9, 0.91, 1.0)
-//    );
-//
-//    fonts_manager.show_text(&mut builder, &scroll_space_and_clip, text.as_str(), LayoutPoint::new(0.0, text_size as f32));
-//
-//    builder.pop_stacking_context();
-//    epoch.0 += 1;
-//
-//    txn.set_display_list(
-//        epoch.clone(),
-//        None,
-//        layout_size,
-//        builder.finalize(),
-//        true,
-//    );
-//
-//    txn.set_root_pipeline(pipeline_id);
-//    txn.generate_frame();
-//    api.send_transaction(document_id, txn);
-//}
-
 enum UserEvent {
     Scroll { cursor_position: WorldPoint, delta: MouseScrollDelta },
     Repaint
@@ -213,9 +159,6 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
 
     let document_id = api.add_document(framebuffer_size, 0);
     let pipeline_id = webrender::api::PipelineId(0, 0);
-//    let fonts_manager = text::FontsManager::new(sender.create_api(), document_id);
-//    let mut epoch = Epoch(0);
-//    render_text_from_file(&api, &fonts_manager, pipeline_id, document_id, layout_size, &mut epoch, "resources/EditorImpl.java".to_string());
 
     let mut txn = Transaction::new();
     txn.set_root_pipeline(pipeline_id);
@@ -235,17 +178,9 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                     UserEvent::Repaint => {
                         perf::on_new_frame_ready();
                         renderer.update();
-//                        {
-//                            let gl = renderer.device.rc_gl().as_ref();
-//                            gl.clear_color(1.0, 1.0, 1.0, 0.0);
-//                            gl.clear(gleam::gl::COLOR_BUFFER_BIT);
-//                        }
                         renderer.render(framebuffer_size).unwrap();
                         renderer.flush_pipeline_info();
                         perf::on_frame_rendered();
-                        profile_scope!("Swap buffers");
-//                        window.swap_buffers().unwrap();
-                        perf::on_new_frame_done();
                     },
                 }
             },
@@ -271,6 +206,7 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                             let mut debug_flags = renderer.get_debug_flags();
                             debug_flags.toggle(DebugFlags::PROFILER_DBG);
                             debug_flags.toggle(DebugFlags::GPU_TIME_QUERIES);
+                            debug_flags.toggle(DebugFlags::RENDER_TARGET_DBG);
                             api.send_debug_cmd(DebugCommand::SetFlags(debug_flags));
                         }
                         winit::VirtualKeyCode::D => {
@@ -310,15 +246,6 @@ fn run_event_loop<A: ToSocketAddrs>(render_server_addr: A) {
                 winit::WindowEvent::MouseWheel { delta, ..
                 } => {
                     controller.mouse_wheel(cursor_position, delta);
-
-//                    let mut txn = Transaction::new();
-//                    txn.scroll(
-//                        webrender::api::ScrollLocation::Delta(delta_vector),
-//                        cursor_position,
-//                    );
-//                    txn.generate_frame();
-//
-//                    api.send_transaction(document_id, txn);
                 }
                 _ => {}
             },
