@@ -13,6 +13,7 @@ use std::os::raw::{c_char, c_uint, c_void};
 use font_kit::font::{Font};
 use font_kit::hinting::HintingOptions;
 use font_kit::canvas::RasterizationOptions;
+use thread_profiler::{profile_scope};
 
 use webrender::api::{GlyphInstance, LayoutSize};
 

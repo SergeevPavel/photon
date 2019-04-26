@@ -1,9 +1,5 @@
-
-extern crate fxhash;
 use fxhash::FxHashMap;
 
-
-use std::io::prelude::*;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,7 +7,7 @@ use byteorder::{ReadBytesExt, BigEndian};
 use serde_json::Value;
 use webrender::api::*;
 
-use crate::{text, perf};
+use crate::{text};
 use crate::transport::*;
 
 use euclid::TypedSize2D;
@@ -19,6 +15,11 @@ use std::sync::{Mutex, Arc};
 use serde::{Serialize};
 use crate::text::FontsManager;
 use thread_profiler::{register_thread_with_profiler};
+
+use thread_profiler::{profile_scope};
+use std::io::{Read, Write};
+
+type LogId = u64;
 
 fn read_msg(stream: &mut TcpStream) -> Option<Vec<u8>> {
     let size = stream.read_u32::<BigEndian>().unwrap();
@@ -420,7 +421,6 @@ fn apply_updates(dom: &mut Dom, context: &mut ApplyUpdatesContext, message: &Vec
         match update {
             UpdateOrLogId::LogIds(ids) => {
                 log_ids = ids;
-                perf::on_get_noria_message(log_ids.clone());
             }
             UpdateOrLogId::Update(update) => {
                 match update {
@@ -489,6 +489,7 @@ pub struct Controller {
     document_id: DocumentId,
     pipeline_id: PipelineId,
     api: RenderApi,
+    log_id: LogId,
 }
 
 impl Clone for Controller {
@@ -499,6 +500,7 @@ impl Clone for Controller {
             document_id: self.document_id,
             pipeline_id: self.pipeline_id,
             api: self.api.clone_sender().create_api(),
+            log_id: self.log_id,
         }
     }
 }
@@ -520,8 +522,8 @@ impl Controller {
     }
 
     pub fn mouse_wheel(&mut self, cursor_position: WorldPoint, delta: winit::MouseScrollDelta) {
-        let log_id = perf::on_get_mouse_wheel();
-        profile_scope!(leak_str(format!("Mouse wheel {}", log_id)));
+        self.log_id += 1;
+        profile_scope!(leak_str(format!("Mouse wheel {}", self.log_id)));
         let hit_result = self.api.hit_test(self.document_id, Some(self.pipeline_id), cursor_position, HitTestFlags::empty());
         const LINE_HEIGHT: f32 = 38.0;
         let delta_vector = match delta {
@@ -532,13 +534,12 @@ impl Controller {
         for item in hit_result.items {
             let (node_id, _) = item.tag;
             let node_type = &dom.nodes.get(&node_id).unwrap().node_type;
-            perf::on_send_mouse_wheel(log_id);
-            node_type.on_wheel(&mut self.stream, log_id, node_id, &delta_vector);
+            node_type.on_wheel(&mut self.stream, self.log_id, node_id, &delta_vector);
         }
     }
 }
 
-struct TransactionNotificationHandler(Vec<perf::LogId>);
+struct TransactionNotificationHandler(Vec<LogId>);
 impl NotificationHandler for TransactionNotificationHandler {
     fn notify(&self, when: Checkpoint) {
         profile_scope!(leak_str(format!("Transaction Notify {:?} {:?}", when, self.0)));
@@ -598,7 +599,6 @@ impl NoriaClient {
                         txn.update_epoch(updater.pipeline_id, epoch);
                         epoch.0 += 1;
                         txn.generate_frame();
-                        perf::on_send_transaction(&log_ids);
                         txn.notify(NotificationRequest::new(Checkpoint::FrameRendered, Box::new(TransactionNotificationHandler(log_ids))));
                         updater.api.send_transaction(updater.document_id, txn);
                     } else {
@@ -612,6 +612,7 @@ impl NoriaClient {
             document_id: document_id,
             pipeline_id: pipeline_id,
             api: sender.create_api(),
+            log_id: 0,
         }
     }
 
